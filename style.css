@@ -1818,6 +1818,21 @@ p.card-meaning-item { font-size: 18px; text-align: center; margin: 0; }
 #leitner-finished-screen h3 { font-size: 24px; margin-bottom: 10px; }
 #leitner-finished-screen p { font-size: 16px; color: #666; margin-bottom: 20px; }
 
+/* Leitner layout tweaks for desktop and short viewports */
+@media (min-width: 769px) {
+  .leitner-container { max-width: 640px; height: 70vh; max-height: 720px; }
+  .leitner-body { padding: 24px; }
+  .leitner-card { max-height: 320px; }
+}
+
+@media (max-height: 600px) {
+  .leitner-container { height: 92vh; max-height: none; }
+  .leitner-body { padding: 12px; }
+  .leitner-card { max-height: 220px; }
+  #leitner-initial-controls { padding-top: 12px; }
+  #leitner-rating-controls { padding-top: 12px; }
+}
+
 /* Dark Theme Support for Leitner */
 body.theme-dark .leitner-container {
   background: #2d2d2d;
