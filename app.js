@@ -299,6 +299,33 @@ class CacheDB {
   }
 }
 
+// --- Small helpers ---
+function stripInlineMarkdownArtifacts(text) {
+  if (text == null) return '';
+  let t = String(text);
+  // Remove common list markers at the start of lines (e.g. "- ", "* ", "1. ")
+  t = t.replace(/^\s*(?:[-*•]+\s+|\d+\.|\d+\))\s+/gm, '');
+  // Remove blockquote prefix
+  t = t.replace(/^\s*>\s+/gm, '');
+  // Inline emphasis/code markers
+  t = t.replace(/\*\*([^*]+)\*\*/g, '$1');
+  t = t.replace(/__([^_]+)__/g, '$1');
+  t = t.replace(/\*([^*]+)\*/g, '$1');
+  t = t.replace(/_([^_]+)_/g, '$1');
+  t = t.replace(/`([^`]+)`/g, '$1');
+  return t.trim();
+}
+
+async function waitForGlobalObject(propName, timeoutMs = 2000, pollMs = 50) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const value = globalThis?.[propName];
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+  }
+  return null;
+}
+
 class AIChatApp {
   constructor() {
     this.API_KEY = localStorage.getItem("gemini_api_key");
@@ -393,13 +420,13 @@ class AIChatApp {
         #card-back-text { text-align: center; }
         .card-meaning-item { 
             position: relative; 
-            padding: 8px 0;
+        padding: 8px 12px 8px 64px;
             text-align: center; 
-            font-size: 20px;
+        font-size: 18px;
         }
         .card-meaning-type { 
             position: absolute;
-            left: 0;
+        left: 8px;
             top: 50%;
             transform: translateY(-50%);
             font-size: 13px; 
@@ -407,6 +434,10 @@ class AIChatApp {
             background-color: var(--hover-bg); 
             padding: 2px 6px; 
             border-radius: 8px;
+        max-width: 46%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         }
     `;
     document.head.appendChild(style);
@@ -726,7 +757,7 @@ class AIChatApp {
     this.activePopups = this.activePopups.filter(p => p !== popupElement);
   }
 
-  showToast(message, type = 'info', duration = 3000) {
+  showToast(message, type = 'info', duration = 1800) {
     const icons = {
       success: 'OK',
       error: 'X',
@@ -2073,12 +2104,16 @@ class AIChatApp {
     button.classList.add("playing");
     if (progressBar) this.updateProgress(progressBar, 0);
     try {
-      if (typeof puter === 'undefined') throw new Error("Puter.js not loaded");
-      // Use OpenAI provider with 'onyx' voice (male deep voice)
-      const audio = await puter.ai.txt2speech(text, {
+      let puterRef = globalThis?.puter;
+      if (!puterRef) {
+        puterRef = await waitForGlobalObject('puter', 2500, 50);
+      }
+      if (!puterRef) throw new Error("Puter.js not loaded");
+      // Use OpenAI provider with a male voice (free via Puter)
+      const audio = await puterRef.ai.txt2speech(text, {
         provider: 'openai',
         model: 'tts-1',
-        voice: 'onyx',
+        voice: 'echo',
         response_format: 'mp3'
       });
       // puter.ai.txt2speech returns an HTMLAudioElement with blob URL
@@ -2868,7 +2903,10 @@ Be thorough and comprehensive.`;
       meaningData.meanings.forEach(meaning => {
         const div = document.createElement("div");
         div.className = "meaning-item";
-        div.innerHTML = `<div class="meaning-text">${meaning.text}</div><span class="meaning-type">${meaning.type}</span>`;
+        const meaningText = stripInlineMarkdownArtifacts(meaning?.text ?? meaning?.meaning ?? '');
+        const meaningTypeRaw = meaning?.type ?? meaning?.partOfSpeech ?? meaning?.pos ?? meaning?.role ?? '';
+        const meaningType = stripInlineMarkdownArtifacts(meaningTypeRaw);
+        div.innerHTML = `<div class="meaning-text">${meaningText}</div>${meaningType ? `<span class="meaning-type">${meaningType}</span>` : ''}`;
         meaningsListEl.appendChild(div);
       });
     } else {
@@ -3308,6 +3346,10 @@ Be thorough and comprehensive.`;
     }
     if (this.cardBackText) {
       this.cardBackText.innerHTML = '<div class="card-meaning-item">Loading meaning...</div>';
+      try {
+        const backEl = this.cardBackText.closest('.card-back');
+        if (backEl) backEl.scrollTop = 0;
+      } catch (_) {}
     }
   }
   
@@ -3336,12 +3378,25 @@ Be thorough and comprehensive.`;
     this.leitnerInitialControls.classList.add('hidden');
     this.leitnerRatingControls.classList.remove('hidden');
     this.updateRatingButtons();
+    // Ensure the first meaning is visible (mobile browsers sometimes keep scroll position)
+    try {
+      const backEl = this.cardBackText?.closest('.card-back');
+      if (backEl) backEl.scrollTop = 0;
+    } catch (_) {}
     try {
         const meaningData = await this.getWordMeaning(this.currentCard.word);
         if (meaningData && meaningData.meanings && meaningData.meanings.length > 0) {
             this.cardBackText.innerHTML = meaningData.meanings
-                .map(m => `<div class="card-meaning-item"><span class="card-meaning-text">${m.text}</span><span class="card-meaning-type">${m.type}</span></div>`)
+                .map(m => {
+                  const text = stripInlineMarkdownArtifacts(m?.text ?? m?.meaning ?? '');
+                  const typeRaw = m?.type ?? m?.partOfSpeech ?? m?.pos ?? m?.role ?? '';
+                  const type = stripInlineMarkdownArtifacts(typeRaw);
+                  return `<div class="card-meaning-item"><span class="card-meaning-text">${text}</span>${type ? `<span class="card-meaning-type">${type}</span>` : ''}</div>`;
+                })
                 .join('');
+            // Reset scroll after content updates too
+            const backEl = this.cardBackText?.closest('.card-back');
+            if (backEl) backEl.scrollTop = 0;
         } else {
             this.cardBackText.innerHTML = '<div class="card-meaning-item">Meaning not found.</div>';
         }
@@ -5033,11 +5088,15 @@ class AdvancedTTSPlayer {
   }
 
   async generatePuterTTS(text) {
-    if (typeof puter === 'undefined') throw new Error("Puter.js not loaded");
-    const audio = await puter.ai.txt2speech(text, {
+    let puterRef = globalThis?.puter;
+    if (!puterRef) {
+      puterRef = await waitForGlobalObject('puter', 2500, 50);
+    }
+    if (!puterRef) throw new Error("Puter.js not loaded");
+    const audio = await puterRef.ai.txt2speech(text, {
       provider: 'openai',
       model: 'tts-1',
-      voice: 'onyx',
+      voice: 'echo',
       response_format: 'mp3'
     });
     if (audio && audio.src) {
