@@ -78,6 +78,7 @@
           <select id="chat-provider-select" class="settings-select">
               <option value="gemini">Provider 1</option>
               <option value="avalai">Provider 2</option>
+              <option value="openrouter">Provider 3</option>
           </select>
         </div>
         
@@ -86,6 +87,7 @@
           <select id="tts-provider-select" class="settings-select">
               <option value="gemini">Provider 1</option>
               <option value="avalai">Provider 2</option>
+              <option value="elevenlabs">Provider 3</option>
           </select>
         </div>
 
@@ -96,6 +98,21 @@
         <div class="setting-section">
             <p>API Key (Provider 2):</p>
             <input type="password" id="avalai-api-key-input" placeholder="Enter your API key...">
+        </div>
+
+        <div class="setting-section">
+          <p>API Key (OpenRouter):</p>
+          <input type="password" id="openrouter-api-key-input" placeholder="Enter your OpenRouter API key...">
+        </div>
+        <div class="setting-section">
+          <p>API Key (ElevenLabs):</p>
+          <input type="password" id="elevenlabs-api-key-input" placeholder="Enter your ElevenLabs API key...">
+        </div>
+
+        <div class="setting-section">
+          <p>ElevenLabs Voice ID (Brian):</p>
+          <input type="text" id="elevenlabs-voice-id-input" placeholder="Enter voice_id (optional)">
+          <small style="color: #666; display: block; margin-top: 5px;">Optional. If your ElevenLabs key lacks <b>voices_read</b>, paste Brian’s voice_id here so the app can call TTS without listing voices.</small>
         </div>
         
         <div class="setting-section">
