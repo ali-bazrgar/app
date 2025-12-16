@@ -213,15 +213,13 @@ class CacheDB {
             if (cursor) {
               const value = cursor.value;
               if (value && value.word) {
-                const normalizedWord = (value.word || '').toString().trim().toLowerCase();
                 const scopeType = value.chatId ? 'chat' : 'global';
                 const scopeId = value.chatId || 'all';
                 const scopeKey = `${scopeType}:${scopeId}`;
-                const id = `${scopeKey}:${normalizedWord}`;
+                const id = `${scopeKey}:${value.word}`;
                 const migrated = {
                   ...value,
                   id,
-                  word: normalizedWord,
                   scopeType,
                   scopeId,
                   scopeKey,
@@ -306,8 +304,6 @@ class AIChatApp {
     this.API_KEY = localStorage.getItem("gemini_api_key");
     this.AVALAI_API_KEY = localStorage.getItem("avalai_api_key");
     this.OPENROUTER_API_KEY = localStorage.getItem("openrouter_api_key");
-    this.ELEVENLABS_API_KEY = localStorage.getItem("elevenlabs_api_key");
-    this.ELEVENLABS_VOICE_ID = localStorage.getItem("elevenlabs_voice_id") || "";
     this.chatProvider = localStorage.getItem("chat_provider") || "gemini";
     this.ttsProvider = localStorage.getItem("tts_provider") || "gemini";
     this.theme = localStorage.getItem("theme") || "light";
@@ -364,9 +360,17 @@ class AIChatApp {
   // ---------- INIT / UI ----------
   async initApp() {
     await this.db.init().catch(err => console.error("Failed to initialize cache DB.", err));
-
-    // One-time/defensive normalization: keep Leitner cards consistent across legacy migrations/imports
-    await this.normalizeLeitnerData().catch(err => console.error('[Leitner] Failed to normalize cards:', err));
+    
+    // Migrate old 'puter' chat provider to 'openrouter'
+    if (this.chatProvider === 'puter') {
+      this.chatProvider = 'openrouter';
+      localStorage.setItem('chat_provider', 'openrouter');
+    }
+    // Migrate old 'browser' tts provider to 'puter'
+    if (this.ttsProvider === 'browser') {
+      this.ttsProvider = 'puter';
+      localStorage.setItem('tts_provider', 'puter');
+    }
     
     // Apply saved theme
     this.applyTheme(this.theme);
@@ -431,9 +435,7 @@ class AIChatApp {
     this.settingsModal = document.getElementById("settings-modal");
     this.newApiKeyInput = document.getElementById("new-api-key-input");
     this.avalaiApiKeyInput = document.getElementById("avalai-api-key-input");
-    this.openRouterApiKeyInput = document.getElementById("openrouter-api-key-input");
-    this.elevenLabsApiKeyInput = document.getElementById("elevenlabs-api-key-input");
-    this.elevenLabsVoiceIdInput = document.getElementById("elevenlabs-voice-id-input");
+    this.openrouterApiKeyInput = document.getElementById("openrouter-api-key-input");
     this.chatProviderSelect = document.getElementById("chat-provider-select");
     this.ttsProviderSelect = document.getElementById("tts-provider-select");
     this.themeSelect = document.getElementById("theme-select");
@@ -468,6 +470,7 @@ class AIChatApp {
     this.closeLeitnerBtn = document.getElementById("close-leitner-btn");
     this.leitnerStatsNew = document.getElementById("leitner-stats-new");
     this.leitnerStatsDue = document.getElementById("leitner-stats-due");
+    this.leitnerBoxProgress = document.getElementById("leitner-box-progress");
     this.leitnerCardContainer = document.getElementById("leitner-card-container");
     this.leitnerCard = document.querySelector(".leitner-card");
     this.cardFrontText = document.getElementById("card-front-text");
@@ -771,9 +774,7 @@ class AIChatApp {
   showSettingsModal() {
     this.newApiKeyInput.value = this.API_KEY || "";
     this.avalaiApiKeyInput.value = this.AVALAI_API_KEY || "";
-    if (this.openRouterApiKeyInput) this.openRouterApiKeyInput.value = this.OPENROUTER_API_KEY || "";
-    if (this.elevenLabsApiKeyInput) this.elevenLabsApiKeyInput.value = this.ELEVENLABS_API_KEY || "";
-    if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID || "";
+    this.openrouterApiKeyInput.value = this.OPENROUTER_API_KEY || "";
     this.chatProviderSelect.value = this.chatProvider;
     this.ttsProviderSelect.value = this.ttsProvider;
     this.themeSelect.value = this.theme;
@@ -789,9 +790,7 @@ class AIChatApp {
   saveSettings() {
     const geminiKey = this.newApiKeyInput.value.trim();
     const avalaiKey = this.avalaiApiKeyInput.value.trim();
-    const openRouterKey = this.openRouterApiKeyInput ? this.openRouterApiKeyInput.value.trim() : "";
-    const elevenLabsKey = this.elevenLabsApiKeyInput ? this.elevenLabsApiKeyInput.value.trim() : "";
-    const elevenLabsVoiceId = this.elevenLabsVoiceIdInput ? this.elevenLabsVoiceIdInput.value.trim() : "";
+    const openrouterKey = this.openrouterApiKeyInput.value.trim();
     const chatProvider = this.chatProviderSelect.value;
     const ttsProvider = this.ttsProviderSelect.value;
     const theme = this.themeSelect.value;
@@ -802,12 +801,8 @@ class AIChatApp {
     this.API_KEY = geminiKey;
     localStorage.setItem("avalai_api_key", avalaiKey);
     this.AVALAI_API_KEY = avalaiKey;
-    localStorage.setItem("openrouter_api_key", openRouterKey);
-    this.OPENROUTER_API_KEY = openRouterKey;
-    localStorage.setItem("elevenlabs_api_key", elevenLabsKey);
-    this.ELEVENLABS_API_KEY = elevenLabsKey;
-    localStorage.setItem("elevenlabs_voice_id", elevenLabsVoiceId);
-    this.ELEVENLABS_VOICE_ID = elevenLabsVoiceId;
+    localStorage.setItem("openrouter_api_key", openrouterKey);
+    this.OPENROUTER_API_KEY = openrouterKey;
     localStorage.setItem("chat_provider", chatProvider);
     this.chatProvider = chatProvider;
     localStorage.setItem("tts_provider", ttsProvider);
@@ -1015,187 +1010,6 @@ class AIChatApp {
     return (word || '').toString().trim().toLowerCase();
   }
 
-  parseLeitnerCardId(id) {
-    if (!id || typeof id !== 'string') return null;
-    const lastColon = id.lastIndexOf(':');
-    if (lastColon <= 0 || lastColon >= id.length - 1) return null;
-    return {
-      scopeKey: id.slice(0, lastColon),
-      word: id.slice(lastColon + 1)
-    };
-  }
-
-  coerceIsoDate(value, fallbackValue = null) {
-    const candidate = value ? new Date(value) : null;
-    if (candidate && !Number.isNaN(candidate.getTime())) return candidate.toISOString();
-    const fallback = fallbackValue ? new Date(fallbackValue) : null;
-    if (fallback && !Number.isNaN(fallback.getTime())) return fallback.toISOString();
-    return new Date().toISOString();
-  }
-
-  getMidnightLocal(date) {
-    const d = new Date(date);
-    if (Number.isNaN(d.getTime())) return null;
-    d.setHours(0, 0, 0, 0);
-    return d;
-  }
-
-  normalizeLeitnerCardForStorage(card) {
-    if (!card || typeof card !== 'object') return null;
-    if (!card.id || typeof card.id !== 'string') return null;
-
-    const parsed = this.parseLeitnerCardId(card.id);
-    const inferredScopeKey = card.scopeKey || parsed?.scopeKey || 'global:all';
-    const inferredWordRaw = (card.word || parsed?.word || '').toString();
-    const normalizedWord = this.normalizeWord(inferredWordRaw);
-    if (!normalizedWord) return null;
-
-    // Try to infer scopeType/scopeId from existing fields, falling back to scopeKey
-    let scopeType = card.scopeType;
-    let scopeId = card.scopeId;
-    if (!scopeType || !scopeId) {
-      const firstColon = inferredScopeKey.indexOf(':');
-      if (firstColon > 0) {
-        scopeType = scopeType || inferredScopeKey.slice(0, firstColon);
-        scopeId = scopeId || inferredScopeKey.slice(firstColon + 1);
-      }
-    }
-    scopeType = scopeType || 'global';
-    scopeId = scopeId || 'all';
-
-    // Keep scopeKey stable if it's already valid; otherwise rebuild from scopeType/scopeId
-    const scopeKey = inferredScopeKey || this.getScopeKey({ type: scopeType, id: scopeId });
-    const newId = `${scopeKey}:${normalizedWord}`;
-
-    const createdAt = this.coerceIsoDate(card.createdAt, card.dueDate);
-    const dueDate = this.coerceIsoDate(card.dueDate, createdAt);
-    let lastReviewed = null;
-    if (card.lastReviewed) {
-      const last = new Date(card.lastReviewed);
-      lastReviewed = !Number.isNaN(last.getTime()) ? last.toISOString() : null;
-    }
-
-    const repetitions = Number.isFinite(card.repetitions) ? Math.max(0, Math.floor(card.repetitions)) : 0;
-    const interval = Number.isFinite(card.interval) ? Math.max(0, Math.floor(card.interval)) : 0;
-    const easeFactorRaw = Number.isFinite(card.easeFactor) ? card.easeFactor : 2.5;
-    const easeFactor = Math.max(1.3, easeFactorRaw);
-    const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
-
-    const fixedCard = {
-      ...card,
-      id: newId,
-      word: normalizedWord,
-      scopeType,
-      scopeId,
-      scopeKey,
-      createdAt,
-      dueDate,
-      repetitions,
-      interval,
-      easeFactor,
-      lastReviewed,
-      status
-    };
-
-    const needsWrite =
-      fixedCard.id !== card.id ||
-      fixedCard.word !== card.word ||
-      fixedCard.scopeKey !== card.scopeKey ||
-      fixedCard.dueDate !== card.dueDate ||
-      fixedCard.createdAt !== card.createdAt ||
-      fixedCard.repetitions !== card.repetitions ||
-      fixedCard.interval !== card.interval ||
-      fixedCard.easeFactor !== card.easeFactor ||
-      fixedCard.lastReviewed !== card.lastReviewed ||
-      fixedCard.status !== card.status;
-
-    return { fixedCard, oldId: card.id, newId, needsWrite };
-  }
-
-  mergeLeitnerCards(existingCard, incomingCard) {
-    const existingRep = Number.isFinite(existingCard?.repetitions) ? existingCard.repetitions : 0;
-    const incomingRep = Number.isFinite(incomingCard?.repetitions) ? incomingCard.repetitions : 0;
-
-    const existingLast = existingCard?.lastReviewed ? new Date(existingCard.lastReviewed) : null;
-    const incomingLast = incomingCard?.lastReviewed ? new Date(incomingCard.lastReviewed) : null;
-    const existingLastTs = existingLast && !Number.isNaN(existingLast.getTime()) ? existingLast.getTime() : -1;
-    const incomingLastTs = incomingLast && !Number.isNaN(incomingLast.getTime()) ? incomingLast.getTime() : -1;
-
-    const winner =
-      incomingRep > existingRep ? incomingCard :
-      existingRep > incomingRep ? existingCard :
-      incomingLastTs > existingLastTs ? incomingCard : existingCard;
-
-    const createdAt = this.coerceIsoDate(
-      (existingCard?.createdAt && incomingCard?.createdAt)
-        ? (new Date(existingCard.createdAt) < new Date(incomingCard.createdAt) ? existingCard.createdAt : incomingCard.createdAt)
-        : (existingCard?.createdAt || incomingCard?.createdAt),
-      null
-    );
-
-    const dueA = existingCard?.dueDate ? new Date(existingCard.dueDate) : null;
-    const dueB = incomingCard?.dueDate ? new Date(incomingCard.dueDate) : null;
-    const dueATs = dueA && !Number.isNaN(dueA.getTime()) ? dueA.getTime() : Number.POSITIVE_INFINITY;
-    const dueBTs = dueB && !Number.isNaN(dueB.getTime()) ? dueB.getTime() : Number.POSITIVE_INFINITY;
-    const dueDate = this.coerceIsoDate(dueATs <= dueBTs ? existingCard?.dueDate : incomingCard?.dueDate, createdAt);
-
-    const todayMidnight = this.getMidnightLocal(new Date());
-    const dueMidnight = this.getMidnightLocal(dueDate);
-    const intervalDays = (todayMidnight && dueMidnight)
-      ? Math.max(0, Math.round((dueMidnight.getTime() - todayMidnight.getTime()) / (24 * 60 * 60 * 1000)))
-      : (Number.isFinite(winner?.interval) ? winner.interval : 0);
-
-    const lastReviewedIso = this.coerceIsoDate(incomingLastTs >= existingLastTs ? incomingCard?.lastReviewed : existingCard?.lastReviewed, null);
-    const lastReviewed = (incomingLastTs >= 0 || existingLastTs >= 0) ? lastReviewedIso : null;
-
-    return {
-      ...winner,
-      // Force canonical identity from incoming (already normalized)
-      id: incomingCard.id,
-      word: incomingCard.word,
-      scopeType: incomingCard.scopeType,
-      scopeId: incomingCard.scopeId,
-      scopeKey: incomingCard.scopeKey,
-      createdAt,
-      dueDate,
-      repetitions: Math.max(existingRep, incomingRep),
-      interval: intervalDays,
-      easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
-      lastReviewed
-    };
-  }
-
-  async normalizeLeitnerData() {
-    const allCards = await this.db.getAll(this.LEITNER_STORE);
-    if (!Array.isArray(allCards) || allCards.length === 0) return;
-
-    let writes = 0;
-    let deletes = 0;
-    let merges = 0;
-
-    for (const card of allCards) {
-      const normalized = this.normalizeLeitnerCardForStorage(card);
-      if (!normalized) continue;
-
-      const { fixedCard, oldId, newId, needsWrite } = normalized;
-      if (oldId !== newId) {
-        const existing = await this.db.get(this.LEITNER_STORE, newId);
-        const toSave = existing ? (merges++, this.mergeLeitnerCards(existing, fixedCard)) : fixedCard;
-        await this.db.set(this.LEITNER_STORE, toSave);
-        await this.db.delete(this.LEITNER_STORE, oldId);
-        writes++;
-        deletes++;
-      } else if (needsWrite) {
-        await this.db.set(this.LEITNER_STORE, fixedCard);
-        writes++;
-      }
-    }
-
-    if (writes || deletes || merges) {
-      console.log(`[Leitner] Normalized cards: writes=${writes}, deletes=${deletes}, merges=${merges}`);
-    }
-  }
-
   getChatScope(chatId = null) {
     const id = chatId || this.currentChatId;
     return id ? { type: 'chat', id } : { type: 'global' };
@@ -1238,8 +1052,7 @@ class AIChatApp {
     
     // Store all cards in cache with their full key
     cards.forEach(card => {
-      const normalizedWord = this.normalizeWord(card.word);
-      const wordKey = `${card.scopeKey}:${normalizedWord}`;
+      const wordKey = `${card.scopeKey}:${card.word}`;
       this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(card));
     });
     
@@ -1249,16 +1062,33 @@ class AIChatApp {
   evaluateCardDueState(card) {
     if (!card) return { state: 'none' };
     
-    const now = this.getMidnightLocal(new Date());
-    const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-    const due = this.getMidnightLocal(dueIso) || (now ? new Date(now) : new Date());
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
     
-    const isDue = now ? (due.getTime() <= now.getTime()) : true;
-    const overdue = now ? (due.getTime() < now.getTime()) : false;
+    const due = card.dueDate ? new Date(card.dueDate) : new Date();
+    due.setHours(0, 0, 0, 0);
+    
+    const isDue = due <= now;
+    const daysDiff = Math.floor((now - due) / (24 * 60 * 60 * 1000));
+    const overdue = isDue && daysDiff > 1;
+    const box = card.box || 1;
+    const isNew = (card.repetitions || 0) === 0;
+    
+    let state;
+    if (isNew) {
+      state = 'new';
+    } else if (overdue) {
+      state = 'overdue';
+    } else if (isDue) {
+      state = 'due';
+    } else {
+      state = 'scheduled';
+    }
     
     return {
-      state: isDue ? (overdue ? 'overdue' : 'due') : (((card.repetitions || 0) === 0) ? 'new' : 'scheduled'),
-      dueDate: dueIso,
+      state,
+      dueDate: card.dueDate,
+      box,
       card
     };
   }
@@ -1272,7 +1102,7 @@ class AIChatApp {
     try {
       const card = await this.db.get(this.LEITNER_STORE, cardId);
       if (card) {
-        const wordKey = `${card.scopeKey}:${this.normalizeWord(card.word)}`;
+        const wordKey = `${card.scopeKey}:${card.word}`;
         this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(card));
       } else {
         // Card was deleted, remove from cache
@@ -1284,7 +1114,7 @@ class AIChatApp {
         const globalCardId = `global:all:${normalizedWord}`;
         const globalCard = await this.db.get(this.LEITNER_STORE, globalCardId);
         if (globalCard) {
-          const wordKey = `${globalCard.scopeKey}:${this.normalizeWord(globalCard.word)}`;
+          const wordKey = `${globalCard.scopeKey}:${globalCard.word}`;
           this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(globalCard));
         }
       }
@@ -2220,138 +2050,96 @@ class AIChatApp {
     try {
       const cachedAudio = await this.db.get('audio_cache', text);
       if (cachedAudio && cachedAudio.value) {
+        console.log('Playing cached audio for:', text.substring(0, 30));
         await this.playAudio(cachedAudio.value, button, progressBar);
         return;
       }
     } catch (err) {
       console.error("Error reading audio cache:", err);
     }
-    if (this.ttsProvider === 'avalai' && this.AVALAI_API_KEY) {
+    if (this.ttsProvider === 'puter') {
+      this.playWithPuterTTS(text, button, progressBar);
+    } else if (this.ttsProvider === 'avalai' && this.AVALAI_API_KEY) {
       this.playWithAvalaiTTS(text, button, progressBar);
     } else if (this.ttsProvider === 'gemini' && this.API_KEY) {
       this.playWithGeminiTTS(text, button, progressBar);
-    } else if (this.ttsProvider === 'elevenlabs' && this.ELEVENLABS_API_KEY) {
-      this.playWithElevenLabsTTS(text, button, progressBar);
     } else {
       this.playWithBrowserTTS(text, button, progressBar, messageId);
     }
   }
 
-  async getElevenLabsVoiceIdByName(voiceName) {
-    const normalizedName = (voiceName || '').toString().trim().toLowerCase();
-    if (!normalizedName) return null;
-
-    const cacheKey = `elevenlabs_voice_id_${normalizedName}`;
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) return cached;
-
-    if (!this.ELEVENLABS_API_KEY) return null;
-    const response = await fetch('https://api.elevenlabs.io/v1/voices', {
-      method: 'GET',
-      headers: { 'xi-api-key': this.ELEVENLABS_API_KEY }
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`ElevenLabs voices error: ${response.status} ${errorText}`);
-    }
-    const data = await response.json();
-    const voices = Array.isArray(data?.voices) ? data.voices : [];
-    const match = voices.find(v => (v?.name || '').toString().trim().toLowerCase() === normalizedName);
-    const voiceId = match?.voice_id || null;
-    if (voiceId) localStorage.setItem(cacheKey, voiceId);
-    return voiceId;
-  }
-
-  async getElevenLabsPreferredVoiceId(preferredName = 'Brian') {
-    const manual = (this.ELEVENLABS_VOICE_ID || '').toString().trim();
-    if (manual) return manual;
-
-    // Default to a known public ElevenLabs voice_id for Brian so TTS works
-    // even when the API key lacks the `voices_read` permission.
-    // Users can override this via Settings → ElevenLabs Voice ID.
-    const normalizedName = (preferredName || '').toString().trim().toLowerCase();
-    const builtInVoiceIds = {
-      brian: 'nPczCjzI2devNBz1zQrb'
-    };
-    if (builtInVoiceIds[normalizedName]) return builtInVoiceIds[normalizedName];
-
-    try {
-      const voiceId = await this.getElevenLabsVoiceIdByName(preferredName);
-      if (voiceId) {
-        // Cache a stable voice id so we don't need to call /v1/voices again.
-        this.ELEVENLABS_VOICE_ID = voiceId;
-        localStorage.setItem('elevenlabs_voice_id', voiceId);
-      }
-      return voiceId;
-    } catch (error) {
-      const message = (error && error.message) ? error.message : String(error);
-      const missingPerm = /missing_permissions"?,?\s*"message"?:\s*"The API key you used is missing the permission voices_read/i.test(message) ||
-        /missing the permission voices_read/i.test(message);
-      if (missingPerm) {
-        // We only need voices_read for listing voices; text-to-speech can still work
-        // with a direct voice_id.
-        throw new Error(
-          'ElevenLabs API key lacks voices_read permission, so voice listing is unavailable. ' +
-          'Set a Voice ID in Settings if you want a custom voice.'
-        );
-      }
-      throw error;
-    }
-  }
-
-  async playWithElevenLabsTTS(text, button, progressBar) {
+  async playWithPuterTTS(text, button, progressBar) {
     button.disabled = true;
     button.classList.add("playing");
     if (progressBar) this.updateProgress(progressBar, 0);
     try {
-      const voiceId = await this.getElevenLabsPreferredVoiceId('Brian');
-      if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
-
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': this.ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text,
-          model_id: 'eleven_flash_v2_5'
-        })
+      if (typeof puter === 'undefined') throw new Error("Puter.js not loaded");
+      // Use OpenAI provider with 'onyx' voice (male deep voice)
+      const audio = await puter.ai.txt2speech(text, {
+        provider: 'openai',
+        model: 'tts-1',
+        voice: 'onyx',
+        response_format: 'mp3'
       });
-      if (!response.ok) {
-        const errorText = await response.text();
-        let parsed;
-        try { parsed = JSON.parse(errorText); } catch (_) { parsed = null; }
-        const unusualActivity = response.status === 401 &&
-          (parsed?.detail?.status === 'detected_unusual_activity' || /detected_unusual_activity/i.test(errorText));
-        if (unusualActivity) {
-          throw new Error(
-            'ElevenLabs blocked Free Tier on this network/VPN (detected unusual activity). ' +
-            'Try turning off VPN, switching network/IP, or use a Paid ElevenLabs plan.'
-          );
+      // puter.ai.txt2speech returns an HTMLAudioElement with blob URL
+      if (audio && audio.src) {
+        // Convert blob URL to actual blob for caching
+        let audioBlob;
+        try {
+          audioBlob = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', audio.src, true);
+            xhr.responseType = 'blob';
+            xhr.onload = () => {
+              if (xhr.status === 200) resolve(xhr.response);
+              else reject(new Error(`XHR failed: ${xhr.status}`));
+            };
+            xhr.onerror = () => reject(new Error('XHR network error'));
+            xhr.send();
+          });
+          // Cache it immediately
+          await this.db.set('audio_cache', { text: text, value: audioBlob });
+          console.log('Audio cached successfully for:', text.substring(0, 30));
+        } catch (cacheErr) {
+          console.error("Failed to cache Puter audio:", cacheErr);
         }
-        throw new Error(`ElevenLabs TTS API error: ${response.status} ${errorText}`);
+        
+        // Play using our playAudio method for consistency
+        if (audioBlob) {
+          await this.playAudio(audioBlob, button, progressBar);
+        } else {
+          // Fallback to direct HTMLAudioElement play if blob extraction failed
+          audio.onended = () => {
+            button.classList.remove("playing");
+            button.disabled = false;
+            if (progressBar) {
+              this.updateProgress(progressBar, 100);
+              setTimeout(() => this.updateProgress(progressBar, 0), 500);
+            }
+          };
+          audio.onerror = (e) => {
+            console.error("Audio playback error:", e);
+            button.classList.remove("playing");
+            button.disabled = false;
+            this.showToast("Failed to play audio.", "error");
+          };
+          audio.ontimeupdate = () => {
+            if (audio.duration && progressBar) {
+              const progress = (audio.currentTime / audio.duration) * 100;
+              this.updateProgress(progressBar, progress);
+            }
+          };
+          await audio.play();
+        }
+      } else {
+        throw new Error("Invalid audio response from Puter TTS");
       }
-      const audioBlob = await response.blob();
-      await this.playAudio(audioBlob, button, progressBar);
-      await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
-      console.error("ElevenLabs TTS Error:", error);
+      console.error("Puter TTS Error:", error);
       button.classList.remove("playing");
       button.disabled = false;
       if (progressBar) this.updateProgress(progressBar, 0);
-      const message = (error && error.message) ? error.message : String(error);
-      const networkFailed = /Failed to fetch/i.test(message);
-      if (networkFailed) {
-        this.showToast(
-          'Failed to reach ElevenLabs (network error: Failed to fetch). ' +
-          'This usually means the request was blocked by network/ISP/firewall or DNS. ' +
-          'If VPN triggers Free Tier blocks, use another TTS provider or a Paid ElevenLabs plan.',
-          'error'
-        );
-        return;
-      }
-      this.showToast(`Failed to generate speech with ElevenLabs: ${message}`, "error");
+      this.showToast(`Failed to generate speech with Puter: ${error.message}`, "error");
     }
   }
 
@@ -2625,24 +2413,46 @@ class AIChatApp {
 
   async sendMessage() {
     const text = this.messageInput.value.trim();
-    if (!text || !this.currentChatId || this.isLoading) return;
-    this.addMessage("user", text);
+    if (!text || !this.currentChatId) return;
+    
+    // Prevent double-sending while loading
+    if (this.isLoading) {
+      console.log('Message sending in progress, please wait...');
+      return;
+    }
+    
+    // Immediately clear input and set loading state
     this.messageInput.value = "";
+    this.messageInput.disabled = true;
+    this.sendBtn.disabled = true;
     this.adjustTextareaHeight();
+    this.isLoading = true;
+    
+    // Add user message
+    this.addMessage("user", text);
+    
+    // Create loading indicator
     const loadingWrapper = document.createElement("div");
     loadingWrapper.className = "message-wrapper ai";
+    loadingWrapper.id = "loading-message";
     const loadingDiv = document.createElement("div");
     loadingDiv.className = "message ai";
     loadingDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
     loadingWrapper.appendChild(loadingDiv);
     this.messagesDiv.appendChild(loadingWrapper);
     this.scrollToBottom();
-    this.isLoading = true;
+    
     try {
       const response = await this.callChatAPI(text);
       const aiText = response;
-      loadingWrapper.remove();
+      
+      // Remove loading indicator safely
+      const existingLoader = document.getElementById("loading-message");
+      if (existingLoader) existingLoader.remove();
+      
       this.addMessage("ai", aiText);
+      
+      // Auto-rename chat based on first message
       const chat = this.chats.find(c => c.id === this.currentChatId);
       if (chat && chat.messages.length === 2 && !chat.title.includes('(Imported)')) {
         chat.title = text.substring(0, 30) + (text.length > 30 ? "..." : "");
@@ -2652,10 +2462,18 @@ class AIChatApp {
       }
     } catch (error) {
       console.error("Error:", error);
-      loadingWrapper.remove();
-  this.addMessage("ai", `Error: ${error.message}`);
+      
+      // Remove loading indicator safely
+      const existingLoader = document.getElementById("loading-message");
+      if (existingLoader) existingLoader.remove();
+      
+      this.addMessage("ai", `Error: ${error.message}`);
     } finally {
+      // Always reset loading state and re-enable input
       this.isLoading = false;
+      this.messageInput.disabled = false;
+      this.sendBtn.disabled = false;
+      this.messageInput.focus();
     }
   }
 
@@ -2700,235 +2518,42 @@ class AIChatApp {
   }
 
   async callOpenRouterChatAPI(message) {
-    if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set.");
+    // OpenRouter API with gemma-3-27b-it:free model
+    if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set. Please add it in Settings.");
     const chat = this.chats.find(c => c.id === this.currentChatId);
     if (!chat) throw new Error("Chat not found");
-
-    const history = chat.messages
-      .filter(msg => msg.role !== "system")
-      .slice(-10)
-      .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
-
-    const headers = {
-      'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json'
-    };
-    // Optional OpenRouter attribution headers; avoid invalid values on file://
-    if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
-      headers['HTTP-Referer'] = location.origin;
-    }
-    if (typeof document !== 'undefined' && document.title) {
-      headers['X-Title'] = document.title;
-    }
-
-    const requestBody = {
-      model: 'google/gemma-3-27b-it:free',
-      messages: [...history, { role: 'user', content: message }],
-      // Free variants may require permissive data-policy routing.
-      // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
-      provider: { data_collection: 'allow' }
-    };
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(requestBody)
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      const isDataPolicyBlock =
-        response.status === 404 &&
-        /No endpoints found matching your data policy|Free model publication/i.test(errorText);
-
-      if (isDataPolicyBlock) {
-        throw new Error(
-          `OpenRouter API Error: ${response.status}, ${errorText}\n\n` +
-          `این خطا معمولاً یعنی تنظیمات Privacy/Data Policy اکانت OpenRouter شما استفاده از مدل‌های رایگان را محدود کرده.\n` +
-          `به https://openrouter.ai/settings/privacy بروید و گزینه/سیاست مربوط به «Free model publication» یا Data Policy را طوری تنظیم کنید که اجازه بدهد (Allow).`
-        );
+    const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
+      role: msg.role === "user" ? "user" : "assistant", content: msg.content
+    }));
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'google/gemma-3-27b-it:free',
+          messages: [...history, { role: "user", content: message }]
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenRouter API Error: ${response.status}, ${errorText}`);
       }
-
-      throw new Error(`OpenRouter API Error: ${response.status}, ${errorText}`);
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from OpenRouter.";
+    } catch (error) {
+      console.error("OpenRouter Chat Error:", error);
+      throw new Error(`OpenRouter Error: ${error.message}`);
     }
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from OpenRouter.";
   }
 
   // ---------- Dictionary / Translation ----------
   async getWordMeaning(word) {
     if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
-    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
+    else if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
     return this.getWordMeaningGemini(word);
-  }
-
-  async getWordMeaningOpenRouter(word) {
-    const lowerWord = word.toLowerCase().trim();
-    try {
-      const cachedMeaning = await this.db.get('word_meanings', lowerWord);
-      if (cachedMeaning) return cachedMeaning.value;
-    } catch (err) {
-      console.error("Error reading meaning cache:", err);
-    }
-
-    if (!this.OPENROUTER_API_KEY) {
-      return { meanings: [{ text: `No OpenRouter API Key`, type: "Error" }], synonyms: [], antonyms: [] };
-    }
-
-    const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
-
-CRITICAL REQUIREMENTS:
-1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
-2. Find ALL relevant synonyms (at least 5-10), ordered from CLOSEST meaning to FURTHEST meaning
-3. Find ALL relevant antonyms (at least 3-5 if applicable), ordered from STRONGEST opposite to WEAKEST opposite
-4. Never return empty arrays - always find at least some results
-
-OUTPUT FORMAT (strict JSON):
-{
-  "meanings": [
-    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
-    {"text": "معنی دوم", "type": "نوع کلمه"}
-  ],
-  "synonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"],
-  "antonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"]
-}
-
-Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حرف اضافه
-
-IMPORTANT OUTPUT RULES:
-- Return ONLY valid JSON (no markdown, no code fences, no extra text).
-- Use double quotes for all JSON keys/strings.
-- Meanings MUST be in Persian/Farsi.
-- Synonyms and antonyms MUST be English words ONLY (Latin alphabet). Do NOT return Persian words in synonyms/antonyms.
-
-Be thorough and comprehensive.`;
-
-    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
-    try {
-      const headers = {
-        'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      };
-      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
-        headers['HTTP-Referer'] = location.origin;
-      }
-      if (typeof document !== 'undefined' && document.title) {
-        headers['X-Title'] = document.title;
-      }
-
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: 'google/gemma-3-27b-it:free',
-          messages: [{ role: 'user', content: prompt }],
-          provider: { data_collection: 'allow' },
-          temperature: 0.3
-        })
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        const isDataPolicyBlock =
-          response.status === 404 &&
-          /No endpoints found matching your data policy|Free model publication/i.test(errorText);
-
-        if (isDataPolicyBlock) {
-          return returnError(
-            `OpenRouter API Error: ${response.status}, ${errorText}\n` +
-            `Privacy/Data Policy اکانت OpenRouter اجازه استفاده از مدل‌های رایگان را نمی‌دهد.\n` +
-            `در https://openrouter.ai/settings/privacy تنظیم مربوط به Free model publication / Data Policy را روی Allow قرار بده.`
-          );
-        }
-
-        return returnError(`OpenRouter API Error: ${response.status}, ${errorText}`);
-      }
-      const data = await response.json();
-      const rawText = data.choices?.[0]?.message?.content;
-      if (!rawText) return returnError("No response from OpenRouter API");
-
-      const tryJsonParse = (candidate) => {
-        if (!candidate) return null;
-        const normalized = candidate
-          .trim()
-          .replace(/^\uFEFF/, '')
-          // Remove common markdown fences.
-          .replace(/^```(?:json)?\s*/i, '')
-          .replace(/\s*```\s*$/i, '');
-
-        // Fix a common non-strict JSON issue: trailing commas.
-        const noTrailingCommas = normalized.replace(/,(\s*[}\]])/g, '$1');
-
-        try {
-          return JSON.parse(noTrailingCommas);
-        } catch {
-          return null;
-        }
-      };
-
-      const extractJsonObject = (text) => {
-        if (!text) return null;
-        const start = text.indexOf('{');
-        const end = text.lastIndexOf('}');
-        if (start === -1 || end === -1 || end <= start) return null;
-        return text.slice(start, end + 1);
-      };
-
-      const normalizeWordList = (value) => {
-        const list = Array.isArray(value)
-          ? value.map(v => (v ?? '').toString().trim())
-          : (typeof value === 'string'
-              ? value.split(/[,\n]/g).map(v => v.trim())
-              : []);
-
-        const hasLatin = (s) => /[A-Za-z]/.test(s);
-        const hasArabic = (s) => /[\u0600-\u06FF]/.test(s);
-
-        return list
-          .filter(Boolean)
-          .map(s => s.replace(/^["'\s]+|["'\s]+$/g, ''))
-          .filter(s => s && hasLatin(s) && !hasArabic(s));
-      };
-
-      const normalizeMeaningResult = (obj) => {
-        if (!obj || typeof obj !== 'object') return null;
-        if (!Array.isArray(obj.meanings)) return null;
-
-        const meanings = obj.meanings
-          .map(m => {
-            const text = (m?.text ?? '').toString().trim();
-            const type = (m?.type ?? '').toString().trim();
-            return { text, type };
-          })
-          .filter(m => m.text);
-
-        if (meanings.length === 0) return null;
-
-        return {
-          meanings,
-          synonyms: normalizeWordList(obj.synonyms),
-          antonyms: normalizeWordList(obj.antonyms)
-        };
-      };
-
-      const parsed =
-        tryJsonParse(rawText) ||
-        tryJsonParse(extractJsonObject(rawText));
-
-      const result = normalizeMeaningResult(parsed);
-      if (!result) {
-        console.error("Failed to parse/normalize meaning (OpenRouter). Raw:", rawText);
-        const preview = rawText.toString().slice(0, 400);
-        return returnError(`Failed to parse meaning. Response preview: ${preview}`);
-      }
-
-      await this.db
-        .set('word_meanings', { word: lowerWord, value: result })
-        .catch(err => console.error("Failed to cache meaning:", err));
-
-      return result;
-    } catch (error) {
-      console.error("Word meaning error (OpenRouter):", error);
-      return returnError("Request failed");
-    }
   }
 
   async getWordMeaningAvalai(word) {
@@ -3060,6 +2685,85 @@ Be thorough and comprehensive.`;
     }
   }
 
+  async getWordMeaningOpenRouter(word) {
+    const lowerWord = word.toLowerCase().trim();
+    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
+    if (!this.OPENROUTER_API_KEY) return { meanings: [{ text: `No OpenRouter API Key`, type: "Error" }], synonyms: [], antonyms: [] };
+    
+    const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
+
+CRITICAL REQUIREMENTS:
+1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
+2. Find ALL relevant synonyms (at least 5-10), ordered from CLOSEST meaning to FURTHEST meaning
+3. Find ALL relevant antonyms (at least 3-5 if applicable), ordered from STRONGEST opposite to WEAKEST opposite
+4. Never return empty arrays - always find at least some results
+
+OUTPUT FORMAT (strict JSON):
+{
+  "meanings": [
+    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
+    {"text": "معنی دوم", "type": "نوع کلمه"},
+    ...more from common to rare...
+  ],
+  "synonyms": ["most_similar", "very_similar", "similar", "somewhat_similar", ...],
+  "antonyms": ["strongest_opposite", "strong_opposite", "opposite", ...]
+}
+
+Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حرف اضافه
+
+Example for "happy":
+{
+  "meanings": [
+    {"text": "خوشحال، شاد", "type": "صفت"},
+    {"text": "راضی، خشنود", "type": "صفت"},
+    {"text": "مناسب، موفق (در ترکیبات)", "type": "صفت"}
+  ],
+  "synonyms": ["joyful", "cheerful", "delighted", "pleased", "content", "glad", "merry", "jovial", "upbeat", "elated"],
+  "antonyms": ["sad", "unhappy", "miserable", "depressed", "gloomy", "sorrowful"]
+}
+
+Be thorough and comprehensive.`;
+    
+    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({
+          model: 'google/gemma-3-27b-it:free',
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3
+        })
+      });
+      if (!response.ok) return returnError(`OpenRouter API Error: ${response.status}`);
+      const data = await response.json();
+      const text = data.choices?.[0]?.message?.content;
+      if (!text) return returnError("No response from OpenRouter API");
+      try {
+        // Extract JSON from response (handle markdown code blocks)
+        let jsonText = text;
+        if (typeof text === 'string') {
+          const jsonMatch = text.match(/```json?\s*([\s\S]*?)```/);
+          if (jsonMatch) jsonText = jsonMatch[1];
+          else if (text.includes('{')) jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+        }
+        const result = JSON.parse(jsonText);
+        if (!result.meanings || !Array.isArray(result.meanings)) return returnError("Invalid format received");
+        await this.db.set('word_meanings', { word: lowerWord, value: result }).catch(err => console.error("Failed to cache meaning:", err));
+        return result;
+      } catch (parseError) {
+        console.error("JSON Parse Error:", parseError, "Raw response:", text);
+        return returnError("Failed to parse meaning");
+      }
+    } catch (error) {
+      console.error("Word meaning error (OpenRouter):", error);
+      return returnError("Request failed");
+    }
+  }
+
   async showWordMeaning(word) {
     if (!word.trim()) return;
 
@@ -3078,7 +2782,9 @@ Be thorough and comprehensive.`;
     const addToLeitnerBtn = newPopup.querySelector("#add-to-leitner-btn");
     
     titleEl.textContent = word;
-    meaningsListEl.innerHTML = '<div class="meaning-item">Loading...</div>';
+    meaningsListEl.innerHTML = '<div class="meaning-item loading-meaning"><div class="typing-indicator"><span></span><span></span><span></span></div> Loading meanings...</div>';
+    synonymsListEl.innerHTML = '<span class="word-chip loading-chip">...</span>';
+    antonymsListEl.innerHTML = '<span class="word-chip loading-chip">...</span>';
     
     // Check if word has a due/overdue card in current scope or global
     const normalizedWord = this.normalizeWord(word);
@@ -3200,41 +2906,7 @@ Be thorough and comprehensive.`;
 
   async translateText(text) {
     if (this.chatProvider === 'avalai' && this.AVALAI_API_KEY) return this.translateTextAvalai(text);
-    if (this.chatProvider === 'openrouter' && this.OPENROUTER_API_KEY) return this.translateTextOpenRouter(text);
     return this.translateTextGemini(text);
-  }
-
-  async translateTextOpenRouter(text) {
-    if (!this.OPENROUTER_API_KEY) return `Translation requires API key.`;
-    const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
-    try {
-      const headers = {
-        'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      };
-      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
-        headers['HTTP-Referer'] = location.origin;
-      }
-      if (typeof document !== 'undefined' && document.title) {
-        headers['X-Title'] = document.title;
-      }
-
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: 'google/gemma-3-27b-it:free',
-          messages: [{ role: 'user', content: prompt }],
-          provider: { data_collection: 'allow' }
-        })
-      });
-      if (!response.ok) throw new Error(`API Error: ${response.status}`);
-      const data = await response.json();
-      return data.choices?.[0]?.message?.content || "Translation failed";
-    } catch (error) {
-      console.error("Translation error (OpenRouter):", error);
-      return "Translation failed";
-    }
   }
 
   async translateTextGemini(text) {
@@ -3412,6 +3084,26 @@ Be thorough and comprehensive.`;
   
   // --- Leitner Functions ---
 
+  updateBoxProgressUI(boxStats, currentBox = null) {
+    if (!this.leitnerBoxProgress) return;
+    
+    const boxItems = this.leitnerBoxProgress.querySelectorAll('.box-item');
+    boxItems.forEach(item => {
+      const boxNum = parseInt(item.dataset.box);
+      const countEl = item.querySelector('.box-count');
+      if (countEl) {
+        countEl.textContent = boxStats[boxNum] || 0;
+      }
+      
+      // Highlight current box
+      if (currentBox && boxNum === currentBox) {
+        item.classList.add('active');
+      } else {
+        item.classList.remove('active');
+      }
+    });
+  }
+
   async addCurrentWordToLeitner(word, scope = null) {
     const normalizedWord = this.normalizeWord(word);
     if (!normalizedWord) {
@@ -3463,11 +3155,13 @@ Be thorough and comprehensive.`;
         scopeKey,
         createdAt,
         dueDate: createdAt,
+        // SM-2 Algorithm initial values
+        easeFactor: AIChatApp.SM2_CONFIG.startingEase, // 2.5 (250%)
         repetitions: 0,
-        interval: 0,
-        easeFactor: 2.5,
+        interval: 0, // New cards have no interval yet
         lastReviewed: null,
-        status: 'new'
+        status: 'new',
+        maturityLevel: 1
       };
 
       await this.db.set(this.LEITNER_STORE, newCard);
@@ -3494,63 +3188,64 @@ Be thorough and comprehensive.`;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       
-      let cardsToReview = allCards.filter(card => {
-        // Validate card structure
-        if (!card || !card.scopeKey || !card.word || !card.id) {
-          console.warn('Invalid card found:', card);
-          return false;
-        }
-        
-        // Filter by scope
+      // Get all cards in scope for box statistics
+      const scopeCards = allCards.filter(card => {
+        if (!card || !card.scopeKey || !card.word || !card.id) return false;
         if (card.scopeKey !== scopeKey) {
           if (!includeGlobal) return false;
           if (card.scopeKey !== 'global:all') return false;
         }
-        
-        const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-        const dueDate = this.getMidnightLocal(dueIso);
-        if (!dueDate) return false;
-        return dueDate.getTime() <= today.getTime();
+        return true;
       });
       
-      // Sort cards by priority: overdue (oldest first) -> new -> regular due
+      // Calculate box statistics
+      const boxStats = this.getBoxStats(scopeCards);
+      
+      // Filter cards that are due for review
+      let cardsToReview = scopeCards.filter(card => {
+        if (!card.dueDate) {
+          // Cards without due date are treated as new (due today)
+          return true;
+        }
+        
+        const dueDate = new Date(card.dueDate);
+        if (isNaN(dueDate.getTime())) {
+          return true; // Invalid date = due today
+        }
+        
+        dueDate.setHours(0, 0, 0, 0);
+        return dueDate <= today;
+      });
+      
+      // Sort cards: Box 1 first (most urgent), then by box number, then by due date
       cardsToReview.sort((a, b) => {
-        const aDueIso = this.coerceIsoDate(a.dueDate, a.createdAt);
-        const bDueIso = this.coerceIsoDate(b.dueDate, b.createdAt);
-        const aDue = this.getMidnightLocal(aDueIso) || today;
-        const bDue = this.getMidnightLocal(bDueIso) || today;
+        const aBox = a.box || 1;
+        const bBox = b.box || 1;
         
-        const aIsNew = (a.repetitions || 0) === 0;
-        const bIsNew = (b.repetitions || 0) === 0;
-
-        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
-        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
-
-        // Overdue review cards first
-        if (aIsOverdue && !bIsOverdue) return -1;
-        if (!aIsOverdue && bIsOverdue) return 1;
-        if (aIsOverdue && bIsOverdue) return aDue - bDue;
+        // Lower box = higher priority
+        if (aBox !== bBox) return aBox - bBox;
         
-        // Both new - random order
-        if (aIsNew && bIsNew) return Math.random() - 0.5;
-        
-        // One is new, one is review - new cards next
-        if (aIsNew) return -1;
-        if (bIsNew) return 1;
-        
-        // Both are review cards - sort by due date (oldest first)
+        // Same box - sort by due date (oldest first)
+        const aDue = new Date(a.dueDate || 0);
+        const bDue = new Date(b.dueDate || 0);
         return aDue - bDue;
       });
       
       this.leitnerQueue = cardsToReview;
       
-      // Calculate stats
-      const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-      const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
-      const totalCount = this.leitnerQueue.length;
+      // Calculate stats for display
+      const totalCount = cardsToReview.length;
+      const totalCards = scopeCards.length;
       
-      this.leitnerStatsNew.textContent = `New: ${newCount}`;
-      this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Total: ${totalCount}`;
+      // Store boxStats for later use
+      this.currentBoxStats = boxStats;
+      
+      // Show box distribution
+      this.leitnerStatsNew.textContent = `📥 Due: ${totalCount}`;
+      this.leitnerStatsDue.innerHTML = `📦 Total: ${totalCards}`;
+      
+      // Update box progress UI
+      this.updateBoxProgressUI(boxStats);
       
       if (this.leitnerQueue.length > 0) {
         this.showNextCard();
@@ -3590,17 +3285,30 @@ Be thorough and comprehensive.`;
     
     // Update remaining count in stats
     const remaining = this.leitnerQueue.length;
-    const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-    const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
+    const maturityLevel = this.getMaturityLevel(this.currentCard);
+    const ease = this.currentCard.easeFactor || AIChatApp.SM2_CONFIG.startingEase;
+    const interval = this.currentCard.interval || 0;
     
-    this.leitnerStatsNew.textContent = `New: ${newCount}`;
-    this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Remaining: ${remaining}`;
+    this.leitnerStatsNew.textContent = `📥 Remaining: ${remaining + 1}`;
+    this.leitnerStatsDue.innerHTML = `${this.getMaturityName(maturityLevel)} <small>(${Math.round(ease * 100)}%)</small>`;
+    
+    // Update maturity progress with current level highlighted
+    if (this.currentBoxStats) {
+      this.updateBoxProgressUI(this.currentBoxStats, maturityLevel);
+    }
     
     this.leitnerCard.classList.remove('is-flipped');
     this.leitnerRatingControls.classList.add('hidden');
     this.leitnerInitialControls.classList.remove('hidden');
-    this.cardFrontText.textContent = this.currentCard.word;
-    this.cardBackText.innerHTML = '<div class="card-meaning-item">Loading meaning...</div>';
+    
+    // Show word with maturity indicator and interval
+    if (this.cardFrontText) {
+      const intervalText = interval > 0 ? `${this.formatInterval(interval)}` : 'New';
+      this.cardFrontText.innerHTML = `<span class="card-word">${this.currentCard.word}</span><span class="card-box-badge">${intervalText}</span>`;
+    }
+    if (this.cardBackText) {
+      this.cardBackText.innerHTML = '<div class="card-meaning-item">Loading meaning...</div>';
+    }
   }
   
   showFinishedScreen() {
@@ -3643,109 +3351,206 @@ Be thorough and comprehensive.`;
     }
   }
   
-  // SM-2 Algorithm Implementation (Standard Spaced Repetition)
-  calculateSM2(card, quality) {
+  // SM-2 Algorithm Implementation (Anki-style)
+  // Based on SuperMemo 2 algorithm with Anki modifications
+  
+  static SM2_CONFIG = {
+    // Initial intervals for new cards
+    learningSteps: [1, 10],           // Minutes for learning phase
+    graduatingInterval: 1,             // Days after graduating from learning
+    easyInterval: 4,                   // Days for 'Easy' on new card
+    
+    // Review settings
+    startingEase: 2.5,                 // Initial ease factor (250%)
+    minimumEase: 1.3,                  // Minimum ease factor (130%)
+    easyBonus: 1.3,                    // Easy button multiplier
+    hardInterval: 1.2,                 // Hard button interval multiplier
+    
+    // Ease factor adjustments
+    againPenalty: 0.2,                 // Subtract from ease on Again
+    hardPenalty: 0.15,                 // Subtract from ease on Hard  
+    goodBonus: 0,                      // No change on Good
+    easyBonus: 0.15,                   // Add to ease on Easy
+    
+    // Lapse settings
+    lapseNewInterval: 0.7,             // Multiply interval on lapse
+    lapseMinInterval: 1,               // Minimum interval after lapse (days)
+    relearningSteps: [10]              // Minutes for relearning phase
+  };
+  
+  calculateSM2(card, rating) {
     /*
-     * Anki SM-2 Algorithm with Learning Steps
-     * quality: 0-5 where:
-     *   0: Again (Complete blackout)
-     *   2: Hard (Correct with hesitation)  
-     *   3: Good (Correct response)
-     *   5: Easy (Perfect recall)
+     * SM-2 Algorithm (Anki variant):
+     * Rating: 1=Again, 2=Hard, 3=Good, 4=Easy
+     * 
+     * For NEW cards (repetitions = 0):
+     *   - Again: Stay in learning, repeat
+     *   - Hard: Graduate with interval = 1 day
+     *   - Good: Graduate with interval = graduatingInterval
+     *   - Easy: Graduate with interval = easyInterval
+     *
+     * For REVIEW cards (repetitions > 0):
+     *   - Again (Lapse): Reset to relearning, reduce interval
+     *   - Hard: interval * hardInterval, reduce ease
+     *   - Good: interval * ease
+     *   - Easy: interval * ease * easyBonus
+     *
+     * Ease Factor adjustment:
+     *   new_ease = ease + (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02))
      */
     
-    let { repetitions, interval, easeFactor } = card;
+    const config = AIChatApp.SM2_CONFIG;
+    const isNew = (card.repetitions || 0) === 0;
+    const currentEase = card.easeFactor || config.startingEase;
+    const currentInterval = card.interval || 0;
     
-    // Ensure defaults
-    repetitions = repetitions || 0;
-    interval = interval || 0;
-    easeFactor = easeFactor || 2.5;
+    let newInterval, newEase, newRepetitions, status;
     
-    let newRepetitions;
-    let newInterval;
-    let newEaseFactor;
-    
-    // Again button (quality=0) - Failed card
-    if (quality === 0) {
-      // Failed card - reset to learning
-      newRepetitions = 0;
-      // Again button shows card in same session for new cards, tomorrow for review cards
-      if (repetitions === 0) {
-        newInterval = 0; // Show again soon in same session
-      } else {
-        newInterval = 1; // Review tomorrow for lapsed cards
-      }
-      newEaseFactor = Math.max(1.3, easeFactor - 0.2); // Decrease ease factor
-    } else {
-      // Passed card (Hard, Good, or Easy)
-      // Calculate new ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
-      newEaseFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-      
-      if (repetitions === 0) {
-        // First successful review (Learning -> Graduated)
-        if (quality === 5) {
-          // Easy button on new card - graduate immediately with longer interval
-          newInterval = 4; // Anki default: 4 days for easy on new cards
-          newRepetitions = 2; // Skip learning phase entirely
-        } else if (quality === 2) {
-          // Hard button on new card - graduate but with shorter interval
+    if (isNew) {
+      // New card logic
+      switch (rating) {
+        case 1: // Again - stay in learning
+          newInterval = 0; // Review again today (in minutes: learningSteps[0])
+          newEase = currentEase;
+          newRepetitions = 0;
+          status = 'learning';
+          break;
+        case 2: // Hard - graduate with minimum interval
           newInterval = 1;
-          newRepetitions = 1; // Graduate to review stage
-        } else {
-          // Good button on new card - graduate to review
-          newInterval = 1; // Graduate with 1 day interval
+          newEase = Math.max(config.minimumEase, currentEase - config.hardPenalty);
           newRepetitions = 1;
-        }
-      } else if (repetitions === 1) {
-        // Second successful review (first review after graduating)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - slightly longer than current
-          newInterval = Math.max(2, Math.round(interval * 1.2)); // At least 2 days
-        } else {
-          // Good button
-          newInterval = 6; // Anki default graduating interval (2nd review)
-        }
-        newRepetitions = 2;
-      } else {
-        // Mature card (repetitions >= 2)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - multiply by 1.2
-          newInterval = Math.max(Math.round(interval * 1.2), interval + 1);
-        } else {
-          // Good button - normal interval
-          newInterval = Math.round(interval * newEaseFactor);
-        }
-        newRepetitions = repetitions + 1;
+          status = 'review';
+          break;
+        case 3: // Good - graduate normally
+          newInterval = config.graduatingInterval;
+          newEase = currentEase;
+          newRepetitions = 1;
+          status = 'review';
+          break;
+        case 4: // Easy - graduate with bonus interval
+          newInterval = config.easyInterval;
+          newEase = Math.max(config.minimumEase, currentEase + config.easyBonus);
+          newRepetitions = 1;
+          status = 'review';
+          break;
+      }
+    } else {
+      // Review card logic
+      switch (rating) {
+        case 1: // Again (Lapse) - card failed, needs relearning
+          newInterval = Math.max(
+            config.lapseMinInterval,
+            Math.round(currentInterval * config.lapseNewInterval)
+          );
+          newEase = Math.max(config.minimumEase, currentEase - config.againPenalty);
+          newRepetitions = card.repetitions; // Don't reset count
+          status = 'relearning';
+          break;
+        case 2: // Hard - slightly longer interval, reduce ease
+          newInterval = Math.max(1, Math.round(currentInterval * config.hardInterval));
+          newEase = Math.max(config.minimumEase, currentEase - config.hardPenalty);
+          newRepetitions = card.repetitions + 1;
+          status = 'review';
+          break;
+        case 3: // Good - normal SM-2 calculation
+          newInterval = Math.max(1, Math.round(currentInterval * currentEase));
+          newEase = currentEase; // No change
+          newRepetitions = card.repetitions + 1;
+          status = 'review';
+          break;
+        case 4: // Easy - bonus interval and ease
+          newInterval = Math.max(1, Math.round(currentInterval * currentEase * config.easyBonus));
+          newEase = currentEase + config.easyBonus;
+          newRepetitions = card.repetitions + 1;
+          status = 'review';
+          break;
       }
     }
     
-    // Ensure interval is never 0 except for same-session reviews (Again button)
-    if (newInterval === 0 && quality > 0) {
-      newInterval = 1;
+    // Calculate maturity level (1-5 for UI display)
+    let maturityLevel;
+    if (newRepetitions === 0) {
+      maturityLevel = 1; // Learning
+    } else if (newInterval <= 1) {
+      maturityLevel = 1; // Still learning
+    } else if (newInterval <= 7) {
+      maturityLevel = 2; // Young
+    } else if (newInterval <= 21) {
+      maturityLevel = 3; // Maturing
+    } else if (newInterval <= 60) {
+      maturityLevel = 4; // Mature
+    } else {
+      maturityLevel = 5; // Mastered
     }
     
     return {
-      repetitions: newRepetitions,
       interval: newInterval,
-      easeFactor: newEaseFactor
+      easeFactor: newEase,
+      repetitions: newRepetitions,
+      status: status,
+      maturityLevel: maturityLevel
     };
   }
   
+  getBoxStats(cards) {
+    // Calculate maturity distribution based on intervals (SM-2 style)
+    const stats = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    cards.forEach(card => {
+      const interval = card.interval || 0;
+      const reps = card.repetitions || 0;
+      
+      let level;
+      if (reps === 0) {
+        level = 1; // New/Learning
+      } else if (interval <= 1) {
+        level = 1; // Still learning
+      } else if (interval <= 7) {
+        level = 2; // Young (up to 1 week)
+      } else if (interval <= 21) {
+        level = 3; // Maturing (up to 3 weeks)
+      } else if (interval <= 60) {
+        level = 4; // Mature (up to 2 months)
+      } else {
+        level = 5; // Mastered (2+ months)
+      }
+      
+      stats[level]++;
+    });
+    return stats;
+  }
+  
   formatInterval(days) {
-    if (!days || days < 1) return `<1d`;
-    if (days === 1) return `1 day`;
-    if (days < 30) return `${days} days`;
-    const months = Math.round(days / 30);
-    if (months === 1) return `1 month`;
-    if (months < 12) return `${months} months`;
-    const years = Math.round(months / 12);
-    return years === 1 ? `1 year` : `${years} years`;
+    if (!days || days < 1) return `< 1d`;
+    if (days === 1) return `1d`;
+    if (days < 7) return `${days}d`;
+    if (days < 14) return `1w`;
+    if (days < 21) return `2w`;
+    if (days < 30) return `3w`;
+    if (days < 60) return `1mo`;
+    if (days < 90) return `2mo`;
+    if (days < 180) return `${Math.round(days / 30)}mo`;
+    if (days < 365) return `${Math.round(days / 30)}mo`;
+    const years = Math.round(days / 365 * 10) / 10;
+    return years < 2 ? `1y` : `${years}y`;
+  }
+  
+  getMaturityName(level) {
+    const levels = {
+      1: '🌱 Learning',
+      2: '🌿 Young', 
+      3: '🌳 Maturing',
+      4: '💪 Mature',
+      5: '🎓 Mastered'
+    };
+    return levels[level] || '🌱 Learning';
+  }
+  
+  getEaseDisplay(ease) {
+    const percent = Math.round(ease * 100);
+    if (percent >= 250) return '😊 Easy';
+    if (percent >= 200) return '🙂 Normal';
+    if (percent >= 150) return '😐 Hard';
+    return '😓 Difficult';
   }
   
   updateRatingButtons() {
@@ -3753,69 +3558,74 @@ Be thorough and comprehensive.`;
     
     const card = this.currentCard;
     
-    // Calculate what would happen with each rating
-    const againResult = this.calculateSM2(card, 0);
+    // Calculate what would happen with each SM-2 rating
+    const againResult = this.calculateSM2(card, 1);
     const hardResult = this.calculateSM2(card, 2);
     const goodResult = this.calculateSM2(card, 3);
-    const easyResult = this.calculateSM2(card, 5);
+    const easyResult = this.calculateSM2(card, 4);
     
-    // Update button labels with intervals and keyboard shortcuts
-    this.ratingAgainBtn.innerHTML = `Again<br><small>${this.formatInterval(againResult.interval)} (1)</small>`;
-    this.ratingHardBtn.innerHTML = `Hard<br><small>${this.formatInterval(hardResult.interval)} (2)</small>`;
-    this.ratingGoodBtn.innerHTML = `Good<br><small>${this.formatInterval(goodResult.interval)} (3)</small>`;
-    this.ratingEasyBtn.innerHTML = `Easy<br><small>${this.formatInterval(easyResult.interval)} (4)</small>`;
+    // Show all 4 buttons with SM-2 intervals
+    this.ratingAgainBtn.innerHTML = `Again<br><small>${this.formatInterval(againResult.interval)} [1]</small>`;
+    this.ratingAgainBtn.style.display = '';
+    
+    this.ratingHardBtn.innerHTML = `Hard<br><small>${this.formatInterval(hardResult.interval)} [2]</small>`;
+    this.ratingHardBtn.style.display = '';
+    
+    this.ratingGoodBtn.innerHTML = `Good<br><small>${this.formatInterval(goodResult.interval)} [3]</small>`;
+    this.ratingGoodBtn.style.display = '';
+    
+    this.ratingEasyBtn.innerHTML = `Easy<br><small>${this.formatInterval(easyResult.interval)} [4]</small>`;
+    this.ratingEasyBtn.style.display = '';
   }
 
   async rateCard(rating) {
     if (!this.currentCard) return;
     
-    // Map our 4 buttons to SM-2 quality scores (0-5)
-    const qualityMap = {
-      1: 0, // Again = Complete failure
-      2: 2, // Hard = Incorrect but remembered
-      3: 3, // Good = Correct with difficulty
-      4: 5  // Easy = Perfect recall
-    };
-    
-    const quality = qualityMap[rating];
-    const sm2Result = this.calculateSM2(this.currentCard, quality);
+    // SM-2 Algorithm: rating 1-4 (Again, Hard, Good, Easy)
+    const sm2Result = this.calculateSM2(this.currentCard, rating);
     
     // Calculate next due date
     const nextDueDate = new Date();
-    nextDueDate.setHours(0, 0, 0, 0); // Set to midnight today
+    nextDueDate.setHours(0, 0, 0, 0);
     
-    // Add interval days - if interval is 0, keep it today for same-session review
-    if (sm2Result.interval > 0) {
+    // Add interval days
+    if (sm2Result.interval < 1) {
+      // For intervals less than 1 day (learning cards), set due today
+      // In a real implementation, you'd track minutes
+      nextDueDate.setDate(nextDueDate.getDate());
+    } else {
       nextDueDate.setDate(nextDueDate.getDate() + sm2Result.interval);
     }
     
-    // Determine status
-    let status;
-    if (sm2Result.repetitions === 0) {
-      status = 'learning'; // New cards or lapsed cards
-    } else {
-      status = 'review'; // Graduated cards (rep >= 1)
-    }
-    
-    // Update card in database
+    // Update card in database with SM-2 data
     const updatedCard = {
       ...this.currentCard,
-      repetitions: sm2Result.repetitions,
       interval: sm2Result.interval,
       easeFactor: sm2Result.easeFactor,
+      repetitions: sm2Result.repetitions,
+      status: sm2Result.status,
+      maturityLevel: sm2Result.maturityLevel,
       dueDate: nextDueDate.toISOString(),
-      lastReviewed: new Date().toISOString(),
-      status: status
+      lastReviewed: new Date().toISOString()
     };
     
     await this.db.set(this.LEITNER_STORE, updatedCard);
     
+    // Update maturity stats for UI
+    if (this.currentBoxStats) {
+      const oldLevel = this.getMaturityLevel(this.currentCard);
+      const newLevel = sm2Result.maturityLevel;
+      if (oldLevel !== newLevel) {
+        this.currentBoxStats[oldLevel] = Math.max(0, (this.currentBoxStats[oldLevel] || 0) - 1);
+        this.currentBoxStats[newLevel] = (this.currentBoxStats[newLevel] || 0) + 1;
+      }
+    }
+    
     // Update cache for this word
     await this.refreshLeitnerDueCacheForWord(this.currentCard.word, this.currentLeitnerScope);
     
-    // If interval is 0 (Again button), re-add card to queue for same-session review
-    if (sm2Result.interval === 0) {
-      // Add to end of queue after 3-5 random cards (if available)
+    // If Again (rating 1), re-add card to queue for same-session review
+    if (rating === 1) {
       const insertPosition = Math.min(
         this.leitnerQueue.length,
         Math.floor(Math.random() * 3) + 3
@@ -3824,6 +3634,17 @@ Be thorough and comprehensive.`;
     }
     
     this.showNextCard();
+  }
+  
+  getMaturityLevel(card) {
+    const interval = card.interval || 0;
+    const reps = card.repetitions || 0;
+    
+    if (reps === 0 || interval <= 1) return 1;
+    if (interval <= 7) return 2;
+    if (interval <= 21) return 3;
+    if (interval <= 60) return 4;
+    return 5;
   }
   
   // --- Import/Export ---
@@ -4067,10 +3888,7 @@ Be thorough and comprehensive.`;
           tts_provider: this.ttsProvider || 'gemini',
           theme: this.theme || 'light',
           gemini_api_key: this.API_KEY || '',
-          avalai_api_key: this.AVALAI_API_KEY || '',
-          openrouter_api_key: this.OPENROUTER_API_KEY || '',
-          elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
-          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
+          avalai_api_key: this.AVALAI_API_KEY || ''
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -4231,21 +4049,6 @@ Be thorough and comprehensive.`;
           localStorage.setItem('avalai_api_key', this.AVALAI_API_KEY || '');
           if (this.avalaiApiKeyInput) this.avalaiApiKeyInput.value = this.AVALAI_API_KEY;
         }
-        if (typeof localData.openrouter_api_key === 'string') {
-          this.OPENROUTER_API_KEY = localData.openrouter_api_key;
-          localStorage.setItem('openrouter_api_key', this.OPENROUTER_API_KEY || '');
-          if (this.openRouterApiKeyInput) this.openRouterApiKeyInput.value = this.OPENROUTER_API_KEY;
-        }
-        if (typeof localData.elevenlabs_api_key === 'string') {
-          this.ELEVENLABS_API_KEY = localData.elevenlabs_api_key;
-          localStorage.setItem('elevenlabs_api_key', this.ELEVENLABS_API_KEY || '');
-          if (this.elevenLabsApiKeyInput) this.elevenLabsApiKeyInput.value = this.ELEVENLABS_API_KEY;
-        }
-        if (typeof localData.elevenlabs_voice_id === 'string') {
-          this.ELEVENLABS_VOICE_ID = localData.elevenlabs_voice_id;
-          localStorage.setItem('elevenlabs_voice_id', this.ELEVENLABS_VOICE_ID || '');
-          if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID;
-        }
 
         // Import word meanings
         await this.db.clearStore('word_meanings');
@@ -4282,12 +4085,10 @@ Be thorough and comprehensive.`;
                   const scopeType = card.chatId ? 'chat' : 'global';
                   const scopeId = card.chatId || 'all';
                   const scopeKey = `${scopeType}:${scopeId}`;
-                  const normalizedWord = (card.word || '').toString().trim().toLowerCase();
-                  const id = `${scopeKey}:${normalizedWord}`;
+                  const id = `${scopeKey}:${card.word}`;
                   const migratedCard = {
                     ...card,
                     id,
-                    word: normalizedWord,
                     scopeType,
                     scopeId,
                     scopeKey,
@@ -4337,9 +4138,6 @@ Be thorough and comprehensive.`;
           console.log('Import - No audio cache found in backup');
         }
 
-        // Normalize/repair Leitner cards (handles legacy casing/IDs) before reloading scope
-        await this.normalizeLeitnerData().catch(err => console.error('[Leitner] Failed to normalize after import:', err));
-
         // Reload active scope after import
         const activeScope = this.getActiveScope();
         if (activeScope) {
@@ -4362,7 +4160,7 @@ Be thorough and comprehensive.`;
     reader.readAsText(file);
   }
 
-  // --- Voice Recording & Whisper API ---
+  // --- Voice Recording & Speech Recognition ---
   
   async toggleVoiceRecording() {
     if (this.isRecording) {
@@ -4373,57 +4171,149 @@ Be thorough and comprehensive.`;
   }
 
   async startRecording() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.mediaRecorder = new MediaRecorder(stream);
-      this.audioChunks = [];
+    // If Avalai API key is available, use audio recording + Whisper API
+    if (this.AVALAI_API_KEY) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        this.mediaRecorder = new MediaRecorder(stream);
+        this.audioChunks = [];
+        this.currentAudioStream = stream;
 
-      this.mediaRecorder.ondataavailable = (event) => {
-        this.audioChunks.push(event.data);
-      };
+        this.mediaRecorder.ondataavailable = (event) => {
+          this.audioChunks.push(event.data);
+        };
 
-      this.mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
-        await this.transcribeAudio(audioBlob);
+        this.mediaRecorder.onstop = async () => {
+          const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+          await this.transcribeAudio(audioBlob);
+          
+          // Stop all tracks to release microphone
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        this.mediaRecorder.start();
+        this.isRecording = true;
         
-        // Stop all tracks to release microphone
-        stream.getTracks().forEach(track => track.stop());
-      };
+        // Update UI
+        this.voiceBtn.classList.add('recording');
+        this.voiceBtn.style.backgroundColor = '#ef4444';
+        this.messageInput.placeholder = 'Recording... Click to stop';
+        
+      } catch (error) {
+        console.error('Error accessing microphone:', error);
+        notificationManager.error('Cannot access microphone. Please check permissions.');
+      }
+    } else {
+      // Use browser's Web Speech API for live transcription
+      await this.startBrowserSpeechRecognition();
+    }
+  }
 
-      this.mediaRecorder.start();
+  async startBrowserSpeechRecognition() {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      notificationManager.warning('Voice input requires Chrome browser or setting an API key (Provider 2) in settings.');
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    this.speechRecognition = new SpeechRecognition();
+    this.speechRecognition.lang = 'en-US';
+    this.speechRecognition.continuous = true;
+    this.speechRecognition.interimResults = true;
+
+    this.speechRecognition.onresult = (event) => {
+      let finalTranscript = '';
+      let interimTranscript = '';
+      
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+      
+      if (finalTranscript) {
+        this.messageInput.value += finalTranscript;
+        this.adjustTextareaHeight();
+      }
+      
+      if (interimTranscript) {
+        this.messageInput.placeholder = interimTranscript;
+      }
+    };
+
+    this.speechRecognition.onerror = (event) => {
+      console.error('Speech recognition error:', event.error);
+      if (event.error === 'not-allowed') {
+        notificationManager.warning('Microphone access denied. Please allow microphone access.');
+      } else if (event.error !== 'aborted') {
+        notificationManager.error(`Voice recognition error: ${event.error}`);
+      }
+      this.stopRecording();
+    };
+
+    this.speechRecognition.onend = () => {
+      if (this.isRecording) {
+        // Restart if still recording (continuous mode)
+        try {
+          this.speechRecognition.start();
+        } catch (e) {
+          this.stopRecording();
+        }
+      }
+    };
+
+    try {
+      this.speechRecognition.start();
       this.isRecording = true;
       
       // Update UI
       this.voiceBtn.classList.add('recording');
       this.voiceBtn.style.backgroundColor = '#ef4444';
-  this.messageInput.placeholder = 'Recording... Click to stop';
-      
+      this.messageInput.placeholder = 'Listening... Click to stop';
     } catch (error) {
-      console.error('Error accessing microphone:', error);
-      notificationManager.error('Cannot access microphone. Please check permissions.');
+      console.error('Error starting speech recognition:', error);
+      notificationManager.error('Failed to start voice recognition.');
     }
   }
 
   stopRecording() {
-    if (this.mediaRecorder && this.isRecording) {
+    if (this.mediaRecorder && this.isRecording && this.AVALAI_API_KEY) {
       this.mediaRecorder.stop();
-      this.isRecording = false;
-      
-      // Reset UI
-      this.voiceBtn.classList.remove('recording');
-      this.voiceBtn.style.backgroundColor = '';
-      this.messageInput.placeholder = 'Type a message...';
+      if (this.currentAudioStream) {
+        this.currentAudioStream.getTracks().forEach(track => track.stop());
+        this.currentAudioStream = null;
+      }
     }
+    
+    if (this.speechRecognition) {
+      this.speechRecognition.stop();
+      this.speechRecognition = null;
+    }
+    
+    this.isRecording = false;
+    
+    // Reset UI
+    this.voiceBtn.classList.remove('recording');
+    this.voiceBtn.style.backgroundColor = '';
+    this.messageInput.placeholder = 'Type a message...';
   }
 
   async transcribeAudio(audioBlob) {
-    if (!this.AVALAI_API_KEY) {
-      notificationManager.warning('Please set your API key in settings to use voice input.');
-      return;
+    // Use Avalai Whisper API if API key is available
+    if (this.AVALAI_API_KEY) {
+      return this.transcribeAudioWithAvalai(audioBlob);
     }
+    
+    // Fallback to browser's Web Speech API
+    return this.transcribeAudioWithBrowser();
+  }
 
+  async transcribeAudioWithAvalai(audioBlob) {
     // Show loading indicator
-  this.messageInput.placeholder = 'Transcribing audio...';
+    this.messageInput.placeholder = 'Transcribing audio...';
     this.messageInput.disabled = true;
 
     try {
@@ -4461,6 +4351,47 @@ Be thorough and comprehensive.`;
       this.messageInput.placeholder = 'Type a message...';
       this.messageInput.disabled = false;
     }
+  }
+
+  async transcribeAudioWithBrowser() {
+    // Use Web Speech API for browser-based transcription
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      notificationManager.warning('Voice input is not supported in this browser. Please use Chrome or set an API key in settings.');
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    return new Promise((resolve) => {
+      recognition.onresult = (event) => {
+        const transcribedText = event.results[0][0].transcript;
+        this.messageInput.value = transcribedText;
+        this.adjustTextareaHeight();
+        this.messageInput.focus();
+        resolve(transcribedText);
+      };
+
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'not-allowed') {
+          notificationManager.warning('Microphone access denied. Please allow microphone access.');
+        } else {
+          notificationManager.error(`Voice recognition failed: ${event.error}`);
+        }
+        resolve(null);
+      };
+
+      recognition.onend = () => {
+        this.messageInput.placeholder = 'Type a message...';
+      };
+
+      this.messageInput.placeholder = 'Listening...';
+      recognition.start();
+    });
   }
 }
 
@@ -5078,16 +5009,15 @@ class AdvancedTTSPlayer {
       
       // Generate new audio based on provider
       let audioBlob;
-      if (this.app.ttsProvider === 'avalai' && this.app.AVALAI_API_KEY) {
+      if (this.app.ttsProvider === 'puter') {
+        audioBlob = await this.generatePuterTTS(text);
+      } else if (this.app.ttsProvider === 'avalai' && this.app.AVALAI_API_KEY) {
         audioBlob = await this.generateAvalaiTTS(text);
       } else if (this.app.ttsProvider === 'gemini' && this.app.API_KEY) {
         audioBlob = await this.generateGeminiTTS(text);
-      } else if (this.app.ttsProvider === 'elevenlabs' && this.app.ELEVENLABS_API_KEY) {
-        audioBlob = await this.generateElevenLabsTTS(text);
       } else {
-        // No API key available
-        this.app.showToast('No TTS API key configured', 'error');
-        return null;
+        // No API key available, try Puter as fallback
+        audioBlob = await this.generatePuterTTS(text);
       }
       
       // Cache the full audio
@@ -5100,6 +5030,30 @@ class AdvancedTTSPlayer {
       console.error('TTS generation error:', error);
       return null;
     }
+  }
+
+  async generatePuterTTS(text) {
+    if (typeof puter === 'undefined') throw new Error("Puter.js not loaded");
+    const audio = await puter.ai.txt2speech(text, {
+      provider: 'openai',
+      model: 'tts-1',
+      voice: 'onyx',
+      response_format: 'mp3'
+    });
+    if (audio && audio.src) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', audio.src, true);
+        xhr.responseType = 'blob';
+        xhr.onload = () => {
+          if (xhr.status === 200) resolve(xhr.response);
+          else reject(new Error(`XHR failed: ${xhr.status}`));
+        };
+        xhr.onerror = () => reject(new Error('XHR network error'));
+        xhr.send();
+      });
+    }
+    throw new Error("Invalid audio response from Puter TTS");
   }
 
   async generateAvalaiTTS(text) {
@@ -5158,40 +5112,6 @@ class AdvancedTTSPlayer {
     const pcmDataBuffer = this.app.base64ToArrayBuffer(audioData);
     const pcm16 = new Int16Array(pcmDataBuffer);
     return this.app.pcmToWav(pcm16, sampleRate);
-  }
-
-  async generateElevenLabsTTS(text) {
-    const voiceId = await this.app.getElevenLabsPreferredVoiceId('Brian');
-    if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
-
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': this.app.ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text,
-        model_id: 'eleven_flash_v2_5'
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      let parsed;
-      try { parsed = JSON.parse(errorText); } catch (_) { parsed = null; }
-      const unusualActivity = response.status === 401 &&
-        (parsed?.detail?.status === 'detected_unusual_activity' || /detected_unusual_activity/i.test(errorText));
-      if (unusualActivity) {
-        throw new Error(
-          'ElevenLabs blocked Free Tier on this network/VPN (detected unusual activity). ' +
-          'Try turning off VPN, switching network/IP, or use a Paid ElevenLabs plan.'
-        );
-      }
-      throw new Error(`ElevenLabs TTS error: ${response.status} ${errorText}`);
-    }
-
-    return await response.blob();
   }
 
   startSentenceSync() {
