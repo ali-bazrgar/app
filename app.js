@@ -213,13 +213,15 @@ class CacheDB {
             if (cursor) {
               const value = cursor.value;
               if (value && value.word) {
+                const normalizedWord = (value.word || '').toString().trim().toLowerCase();
                 const scopeType = value.chatId ? 'chat' : 'global';
                 const scopeId = value.chatId || 'all';
                 const scopeKey = `${scopeType}:${scopeId}`;
-                const id = `${scopeKey}:${value.word}`;
+                const id = `${scopeKey}:${normalizedWord}`;
                 const migrated = {
                   ...value,
                   id,
+                  word: normalizedWord,
                   scopeType,
                   scopeId,
                   scopeKey,
@@ -303,6 +305,9 @@ class AIChatApp {
   constructor() {
     this.API_KEY = localStorage.getItem("gemini_api_key");
     this.AVALAI_API_KEY = localStorage.getItem("avalai_api_key");
+    this.OPENROUTER_API_KEY = localStorage.getItem("openrouter_api_key");
+    this.ELEVENLABS_API_KEY = localStorage.getItem("elevenlabs_api_key");
+    this.ELEVENLABS_VOICE_ID = localStorage.getItem("elevenlabs_voice_id") || "";
     this.chatProvider = localStorage.getItem("chat_provider") || "gemini";
     this.ttsProvider = localStorage.getItem("tts_provider") || "gemini";
     this.theme = localStorage.getItem("theme") || "light";
@@ -359,6 +364,9 @@ class AIChatApp {
   // ---------- INIT / UI ----------
   async initApp() {
     await this.db.init().catch(err => console.error("Failed to initialize cache DB.", err));
+
+    // One-time/defensive normalization: keep Leitner cards consistent across legacy migrations/imports
+    await this.normalizeLeitnerData().catch(err => console.error('[Leitner] Failed to normalize cards:', err));
     
     // Apply saved theme
     this.applyTheme(this.theme);
@@ -423,6 +431,9 @@ class AIChatApp {
     this.settingsModal = document.getElementById("settings-modal");
     this.newApiKeyInput = document.getElementById("new-api-key-input");
     this.avalaiApiKeyInput = document.getElementById("avalai-api-key-input");
+    this.openRouterApiKeyInput = document.getElementById("openrouter-api-key-input");
+    this.elevenLabsApiKeyInput = document.getElementById("elevenlabs-api-key-input");
+    this.elevenLabsVoiceIdInput = document.getElementById("elevenlabs-voice-id-input");
     this.chatProviderSelect = document.getElementById("chat-provider-select");
     this.ttsProviderSelect = document.getElementById("tts-provider-select");
     this.themeSelect = document.getElementById("theme-select");
@@ -760,6 +771,9 @@ class AIChatApp {
   showSettingsModal() {
     this.newApiKeyInput.value = this.API_KEY || "";
     this.avalaiApiKeyInput.value = this.AVALAI_API_KEY || "";
+    if (this.openRouterApiKeyInput) this.openRouterApiKeyInput.value = this.OPENROUTER_API_KEY || "";
+    if (this.elevenLabsApiKeyInput) this.elevenLabsApiKeyInput.value = this.ELEVENLABS_API_KEY || "";
+    if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID || "";
     this.chatProviderSelect.value = this.chatProvider;
     this.ttsProviderSelect.value = this.ttsProvider;
     this.themeSelect.value = this.theme;
@@ -775,6 +789,9 @@ class AIChatApp {
   saveSettings() {
     const geminiKey = this.newApiKeyInput.value.trim();
     const avalaiKey = this.avalaiApiKeyInput.value.trim();
+    const openRouterKey = this.openRouterApiKeyInput ? this.openRouterApiKeyInput.value.trim() : "";
+    const elevenLabsKey = this.elevenLabsApiKeyInput ? this.elevenLabsApiKeyInput.value.trim() : "";
+    const elevenLabsVoiceId = this.elevenLabsVoiceIdInput ? this.elevenLabsVoiceIdInput.value.trim() : "";
     const chatProvider = this.chatProviderSelect.value;
     const ttsProvider = this.ttsProviderSelect.value;
     const theme = this.themeSelect.value;
@@ -785,6 +802,12 @@ class AIChatApp {
     this.API_KEY = geminiKey;
     localStorage.setItem("avalai_api_key", avalaiKey);
     this.AVALAI_API_KEY = avalaiKey;
+    localStorage.setItem("openrouter_api_key", openRouterKey);
+    this.OPENROUTER_API_KEY = openRouterKey;
+    localStorage.setItem("elevenlabs_api_key", elevenLabsKey);
+    this.ELEVENLABS_API_KEY = elevenLabsKey;
+    localStorage.setItem("elevenlabs_voice_id", elevenLabsVoiceId);
+    this.ELEVENLABS_VOICE_ID = elevenLabsVoiceId;
     localStorage.setItem("chat_provider", chatProvider);
     this.chatProvider = chatProvider;
     localStorage.setItem("tts_provider", ttsProvider);
@@ -992,6 +1015,187 @@ class AIChatApp {
     return (word || '').toString().trim().toLowerCase();
   }
 
+  parseLeitnerCardId(id) {
+    if (!id || typeof id !== 'string') return null;
+    const lastColon = id.lastIndexOf(':');
+    if (lastColon <= 0 || lastColon >= id.length - 1) return null;
+    return {
+      scopeKey: id.slice(0, lastColon),
+      word: id.slice(lastColon + 1)
+    };
+  }
+
+  coerceIsoDate(value, fallbackValue = null) {
+    const candidate = value ? new Date(value) : null;
+    if (candidate && !Number.isNaN(candidate.getTime())) return candidate.toISOString();
+    const fallback = fallbackValue ? new Date(fallbackValue) : null;
+    if (fallback && !Number.isNaN(fallback.getTime())) return fallback.toISOString();
+    return new Date().toISOString();
+  }
+
+  getMidnightLocal(date) {
+    const d = new Date(date);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  normalizeLeitnerCardForStorage(card) {
+    if (!card || typeof card !== 'object') return null;
+    if (!card.id || typeof card.id !== 'string') return null;
+
+    const parsed = this.parseLeitnerCardId(card.id);
+    const inferredScopeKey = card.scopeKey || parsed?.scopeKey || 'global:all';
+    const inferredWordRaw = (card.word || parsed?.word || '').toString();
+    const normalizedWord = this.normalizeWord(inferredWordRaw);
+    if (!normalizedWord) return null;
+
+    // Try to infer scopeType/scopeId from existing fields, falling back to scopeKey
+    let scopeType = card.scopeType;
+    let scopeId = card.scopeId;
+    if (!scopeType || !scopeId) {
+      const firstColon = inferredScopeKey.indexOf(':');
+      if (firstColon > 0) {
+        scopeType = scopeType || inferredScopeKey.slice(0, firstColon);
+        scopeId = scopeId || inferredScopeKey.slice(firstColon + 1);
+      }
+    }
+    scopeType = scopeType || 'global';
+    scopeId = scopeId || 'all';
+
+    // Keep scopeKey stable if it's already valid; otherwise rebuild from scopeType/scopeId
+    const scopeKey = inferredScopeKey || this.getScopeKey({ type: scopeType, id: scopeId });
+    const newId = `${scopeKey}:${normalizedWord}`;
+
+    const createdAt = this.coerceIsoDate(card.createdAt, card.dueDate);
+    const dueDate = this.coerceIsoDate(card.dueDate, createdAt);
+    let lastReviewed = null;
+    if (card.lastReviewed) {
+      const last = new Date(card.lastReviewed);
+      lastReviewed = !Number.isNaN(last.getTime()) ? last.toISOString() : null;
+    }
+
+    const repetitions = Number.isFinite(card.repetitions) ? Math.max(0, Math.floor(card.repetitions)) : 0;
+    const interval = Number.isFinite(card.interval) ? Math.max(0, Math.floor(card.interval)) : 0;
+    const easeFactorRaw = Number.isFinite(card.easeFactor) ? card.easeFactor : 2.5;
+    const easeFactor = Math.max(1.3, easeFactorRaw);
+    const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
+
+    const fixedCard = {
+      ...card,
+      id: newId,
+      word: normalizedWord,
+      scopeType,
+      scopeId,
+      scopeKey,
+      createdAt,
+      dueDate,
+      repetitions,
+      interval,
+      easeFactor,
+      lastReviewed,
+      status
+    };
+
+    const needsWrite =
+      fixedCard.id !== card.id ||
+      fixedCard.word !== card.word ||
+      fixedCard.scopeKey !== card.scopeKey ||
+      fixedCard.dueDate !== card.dueDate ||
+      fixedCard.createdAt !== card.createdAt ||
+      fixedCard.repetitions !== card.repetitions ||
+      fixedCard.interval !== card.interval ||
+      fixedCard.easeFactor !== card.easeFactor ||
+      fixedCard.lastReviewed !== card.lastReviewed ||
+      fixedCard.status !== card.status;
+
+    return { fixedCard, oldId: card.id, newId, needsWrite };
+  }
+
+  mergeLeitnerCards(existingCard, incomingCard) {
+    const existingRep = Number.isFinite(existingCard?.repetitions) ? existingCard.repetitions : 0;
+    const incomingRep = Number.isFinite(incomingCard?.repetitions) ? incomingCard.repetitions : 0;
+
+    const existingLast = existingCard?.lastReviewed ? new Date(existingCard.lastReviewed) : null;
+    const incomingLast = incomingCard?.lastReviewed ? new Date(incomingCard.lastReviewed) : null;
+    const existingLastTs = existingLast && !Number.isNaN(existingLast.getTime()) ? existingLast.getTime() : -1;
+    const incomingLastTs = incomingLast && !Number.isNaN(incomingLast.getTime()) ? incomingLast.getTime() : -1;
+
+    const winner =
+      incomingRep > existingRep ? incomingCard :
+      existingRep > incomingRep ? existingCard :
+      incomingLastTs > existingLastTs ? incomingCard : existingCard;
+
+    const createdAt = this.coerceIsoDate(
+      (existingCard?.createdAt && incomingCard?.createdAt)
+        ? (new Date(existingCard.createdAt) < new Date(incomingCard.createdAt) ? existingCard.createdAt : incomingCard.createdAt)
+        : (existingCard?.createdAt || incomingCard?.createdAt),
+      null
+    );
+
+    const dueA = existingCard?.dueDate ? new Date(existingCard.dueDate) : null;
+    const dueB = incomingCard?.dueDate ? new Date(incomingCard.dueDate) : null;
+    const dueATs = dueA && !Number.isNaN(dueA.getTime()) ? dueA.getTime() : Number.POSITIVE_INFINITY;
+    const dueBTs = dueB && !Number.isNaN(dueB.getTime()) ? dueB.getTime() : Number.POSITIVE_INFINITY;
+    const dueDate = this.coerceIsoDate(dueATs <= dueBTs ? existingCard?.dueDate : incomingCard?.dueDate, createdAt);
+
+    const todayMidnight = this.getMidnightLocal(new Date());
+    const dueMidnight = this.getMidnightLocal(dueDate);
+    const intervalDays = (todayMidnight && dueMidnight)
+      ? Math.max(0, Math.round((dueMidnight.getTime() - todayMidnight.getTime()) / (24 * 60 * 60 * 1000)))
+      : (Number.isFinite(winner?.interval) ? winner.interval : 0);
+
+    const lastReviewedIso = this.coerceIsoDate(incomingLastTs >= existingLastTs ? incomingCard?.lastReviewed : existingCard?.lastReviewed, null);
+    const lastReviewed = (incomingLastTs >= 0 || existingLastTs >= 0) ? lastReviewedIso : null;
+
+    return {
+      ...winner,
+      // Force canonical identity from incoming (already normalized)
+      id: incomingCard.id,
+      word: incomingCard.word,
+      scopeType: incomingCard.scopeType,
+      scopeId: incomingCard.scopeId,
+      scopeKey: incomingCard.scopeKey,
+      createdAt,
+      dueDate,
+      repetitions: Math.max(existingRep, incomingRep),
+      interval: intervalDays,
+      easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
+      lastReviewed
+    };
+  }
+
+  async normalizeLeitnerData() {
+    const allCards = await this.db.getAll(this.LEITNER_STORE);
+    if (!Array.isArray(allCards) || allCards.length === 0) return;
+
+    let writes = 0;
+    let deletes = 0;
+    let merges = 0;
+
+    for (const card of allCards) {
+      const normalized = this.normalizeLeitnerCardForStorage(card);
+      if (!normalized) continue;
+
+      const { fixedCard, oldId, newId, needsWrite } = normalized;
+      if (oldId !== newId) {
+        const existing = await this.db.get(this.LEITNER_STORE, newId);
+        const toSave = existing ? (merges++, this.mergeLeitnerCards(existing, fixedCard)) : fixedCard;
+        await this.db.set(this.LEITNER_STORE, toSave);
+        await this.db.delete(this.LEITNER_STORE, oldId);
+        writes++;
+        deletes++;
+      } else if (needsWrite) {
+        await this.db.set(this.LEITNER_STORE, fixedCard);
+        writes++;
+      }
+    }
+
+    if (writes || deletes || merges) {
+      console.log(`[Leitner] Normalized cards: writes=${writes}, deletes=${deletes}, merges=${merges}`);
+    }
+  }
+
   getChatScope(chatId = null) {
     const id = chatId || this.currentChatId;
     return id ? { type: 'chat', id } : { type: 'global' };
@@ -1034,7 +1238,8 @@ class AIChatApp {
     
     // Store all cards in cache with their full key
     cards.forEach(card => {
-      const wordKey = `${card.scopeKey}:${card.word}`;
+      const normalizedWord = this.normalizeWord(card.word);
+      const wordKey = `${card.scopeKey}:${normalizedWord}`;
       this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(card));
     });
     
@@ -1044,19 +1249,16 @@ class AIChatApp {
   evaluateCardDueState(card) {
     if (!card) return { state: 'none' };
     
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    const now = this.getMidnightLocal(new Date());
+    const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
+    const due = this.getMidnightLocal(dueIso) || (now ? new Date(now) : new Date());
     
-    const due = card.dueDate ? new Date(card.dueDate) : new Date();
-    due.setHours(0, 0, 0, 0);
-    
-    const isDue = due <= now;
-    const daysDiff = Math.floor((now - due) / (24 * 60 * 60 * 1000));
-    const overdue = isDue && daysDiff > 1;
+    const isDue = now ? (due.getTime() <= now.getTime()) : true;
+    const overdue = now ? (due.getTime() < now.getTime()) : false;
     
     return {
-      state: isDue ? (overdue ? 'overdue' : 'due') : (card.repetitions === 0 ? 'new' : 'scheduled'),
-      dueDate: card.dueDate,
+      state: isDue ? (overdue ? 'overdue' : 'due') : (((card.repetitions || 0) === 0) ? 'new' : 'scheduled'),
+      dueDate: dueIso,
       card
     };
   }
@@ -1070,7 +1272,7 @@ class AIChatApp {
     try {
       const card = await this.db.get(this.LEITNER_STORE, cardId);
       if (card) {
-        const wordKey = `${card.scopeKey}:${card.word}`;
+        const wordKey = `${card.scopeKey}:${this.normalizeWord(card.word)}`;
         this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(card));
       } else {
         // Card was deleted, remove from cache
@@ -1082,7 +1284,7 @@ class AIChatApp {
         const globalCardId = `global:all:${normalizedWord}`;
         const globalCard = await this.db.get(this.LEITNER_STORE, globalCardId);
         if (globalCard) {
-          const wordKey = `${globalCard.scopeKey}:${globalCard.word}`;
+          const wordKey = `${globalCard.scopeKey}:${this.normalizeWord(globalCard.word)}`;
           this.leitnerDueCache.set(wordKey, this.evaluateCardDueState(globalCard));
         }
       }
@@ -2028,8 +2230,128 @@ class AIChatApp {
       this.playWithAvalaiTTS(text, button, progressBar);
     } else if (this.ttsProvider === 'gemini' && this.API_KEY) {
       this.playWithGeminiTTS(text, button, progressBar);
+    } else if (this.ttsProvider === 'elevenlabs' && this.ELEVENLABS_API_KEY) {
+      this.playWithElevenLabsTTS(text, button, progressBar);
     } else {
       this.playWithBrowserTTS(text, button, progressBar, messageId);
+    }
+  }
+
+  async getElevenLabsVoiceIdByName(voiceName) {
+    const normalizedName = (voiceName || '').toString().trim().toLowerCase();
+    if (!normalizedName) return null;
+
+    const cacheKey = `elevenlabs_voice_id_${normalizedName}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) return cached;
+
+    if (!this.ELEVENLABS_API_KEY) return null;
+    const response = await fetch('https://api.elevenlabs.io/v1/voices', {
+      method: 'GET',
+      headers: { 'xi-api-key': this.ELEVENLABS_API_KEY }
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`ElevenLabs voices error: ${response.status} ${errorText}`);
+    }
+    const data = await response.json();
+    const voices = Array.isArray(data?.voices) ? data.voices : [];
+    const match = voices.find(v => (v?.name || '').toString().trim().toLowerCase() === normalizedName);
+    const voiceId = match?.voice_id || null;
+    if (voiceId) localStorage.setItem(cacheKey, voiceId);
+    return voiceId;
+  }
+
+  async getElevenLabsPreferredVoiceId(preferredName = 'Brian') {
+    const manual = (this.ELEVENLABS_VOICE_ID || '').toString().trim();
+    if (manual) return manual;
+
+    // Default to a known public ElevenLabs voice_id for Brian so TTS works
+    // even when the API key lacks the `voices_read` permission.
+    // Users can override this via Settings → ElevenLabs Voice ID.
+    const normalizedName = (preferredName || '').toString().trim().toLowerCase();
+    const builtInVoiceIds = {
+      brian: 'nPczCjzI2devNBz1zQrb'
+    };
+    if (builtInVoiceIds[normalizedName]) return builtInVoiceIds[normalizedName];
+
+    try {
+      const voiceId = await this.getElevenLabsVoiceIdByName(preferredName);
+      if (voiceId) {
+        // Cache a stable voice id so we don't need to call /v1/voices again.
+        this.ELEVENLABS_VOICE_ID = voiceId;
+        localStorage.setItem('elevenlabs_voice_id', voiceId);
+      }
+      return voiceId;
+    } catch (error) {
+      const message = (error && error.message) ? error.message : String(error);
+      const missingPerm = /missing_permissions"?,?\s*"message"?:\s*"The API key you used is missing the permission voices_read/i.test(message) ||
+        /missing the permission voices_read/i.test(message);
+      if (missingPerm) {
+        // We only need voices_read for listing voices; text-to-speech can still work
+        // with a direct voice_id.
+        throw new Error(
+          'ElevenLabs API key lacks voices_read permission, so voice listing is unavailable. ' +
+          'Set a Voice ID in Settings if you want a custom voice.'
+        );
+      }
+      throw error;
+    }
+  }
+
+  async playWithElevenLabsTTS(text, button, progressBar) {
+    button.disabled = true;
+    button.classList.add("playing");
+    if (progressBar) this.updateProgress(progressBar, 0);
+    try {
+      const voiceId = await this.getElevenLabsPreferredVoiceId('Brian');
+      if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
+
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': this.ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text,
+          model_id: 'eleven_flash_v2_5'
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        let parsed;
+        try { parsed = JSON.parse(errorText); } catch (_) { parsed = null; }
+        const unusualActivity = response.status === 401 &&
+          (parsed?.detail?.status === 'detected_unusual_activity' || /detected_unusual_activity/i.test(errorText));
+        if (unusualActivity) {
+          throw new Error(
+            'ElevenLabs blocked Free Tier on this network/VPN (detected unusual activity). ' +
+            'Try turning off VPN, switching network/IP, or use a Paid ElevenLabs plan.'
+          );
+        }
+        throw new Error(`ElevenLabs TTS API error: ${response.status} ${errorText}`);
+      }
+      const audioBlob = await response.blob();
+      await this.playAudio(audioBlob, button, progressBar);
+      await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
+    } catch (error) {
+      console.error("ElevenLabs TTS Error:", error);
+      button.classList.remove("playing");
+      button.disabled = false;
+      if (progressBar) this.updateProgress(progressBar, 0);
+      const message = (error && error.message) ? error.message : String(error);
+      const networkFailed = /Failed to fetch/i.test(message);
+      if (networkFailed) {
+        this.showToast(
+          'Failed to reach ElevenLabs (network error: Failed to fetch). ' +
+          'This usually means the request was blocked by network/ISP/firewall or DNS. ' +
+          'If VPN triggers Free Tier blocks, use another TTS provider or a Paid ElevenLabs plan.',
+          'error'
+        );
+        return;
+      }
+      this.showToast(`Failed to generate speech with ElevenLabs: ${message}`, "error");
     }
   }
 
@@ -2340,6 +2662,7 @@ class AIChatApp {
   async callChatAPI(message) {
     if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message);
     else if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message);
+    else if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message);
     else throw new Error("No chat provider selected or API key is missing.");
   }
 
@@ -2376,10 +2699,236 @@ class AIChatApp {
     return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from Provider 2.";
   }
 
+  async callOpenRouterChatAPI(message) {
+    if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set.");
+    const chat = this.chats.find(c => c.id === this.currentChatId);
+    if (!chat) throw new Error("Chat not found");
+
+    const history = chat.messages
+      .filter(msg => msg.role !== "system")
+      .slice(-10)
+      .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
+
+    const headers = {
+      'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json'
+    };
+    // Optional OpenRouter attribution headers; avoid invalid values on file://
+    if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
+      headers['HTTP-Referer'] = location.origin;
+    }
+    if (typeof document !== 'undefined' && document.title) {
+      headers['X-Title'] = document.title;
+    }
+
+    const requestBody = {
+      model: 'google/gemma-3-27b-it:free',
+      messages: [...history, { role: 'user', content: message }],
+      // Free variants may require permissive data-policy routing.
+      // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
+      provider: { data_collection: 'allow' }
+    };
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody)
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      const isDataPolicyBlock =
+        response.status === 404 &&
+        /No endpoints found matching your data policy|Free model publication/i.test(errorText);
+
+      if (isDataPolicyBlock) {
+        throw new Error(
+          `OpenRouter API Error: ${response.status}, ${errorText}\n\n` +
+          `این خطا معمولاً یعنی تنظیمات Privacy/Data Policy اکانت OpenRouter شما استفاده از مدل‌های رایگان را محدود کرده.\n` +
+          `به https://openrouter.ai/settings/privacy بروید و گزینه/سیاست مربوط به «Free model publication» یا Data Policy را طوری تنظیم کنید که اجازه بدهد (Allow).`
+        );
+      }
+
+      throw new Error(`OpenRouter API Error: ${response.status}, ${errorText}`);
+    }
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from OpenRouter.";
+  }
+
   // ---------- Dictionary / Translation ----------
   async getWordMeaning(word) {
     if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
+    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
     return this.getWordMeaningGemini(word);
+  }
+
+  async getWordMeaningOpenRouter(word) {
+    const lowerWord = word.toLowerCase().trim();
+    try {
+      const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+      if (cachedMeaning) return cachedMeaning.value;
+    } catch (err) {
+      console.error("Error reading meaning cache:", err);
+    }
+
+    if (!this.OPENROUTER_API_KEY) {
+      return { meanings: [{ text: `No OpenRouter API Key`, type: "Error" }], synonyms: [], antonyms: [] };
+    }
+
+    const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
+
+CRITICAL REQUIREMENTS:
+1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
+2. Find ALL relevant synonyms (at least 5-10), ordered from CLOSEST meaning to FURTHEST meaning
+3. Find ALL relevant antonyms (at least 3-5 if applicable), ordered from STRONGEST opposite to WEAKEST opposite
+4. Never return empty arrays - always find at least some results
+
+OUTPUT FORMAT (strict JSON):
+{
+  "meanings": [
+    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
+    {"text": "معنی دوم", "type": "نوع کلمه"}
+  ],
+  "synonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"],
+  "antonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"]
+}
+
+Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حرف اضافه
+
+IMPORTANT OUTPUT RULES:
+- Return ONLY valid JSON (no markdown, no code fences, no extra text).
+- Use double quotes for all JSON keys/strings.
+- Meanings MUST be in Persian/Farsi.
+- Synonyms and antonyms MUST be English words ONLY (Latin alphabet). Do NOT return Persian words in synonyms/antonyms.
+
+Be thorough and comprehensive.`;
+
+    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
+    try {
+      const headers = {
+        'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      };
+      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
+        headers['HTTP-Referer'] = location.origin;
+      }
+      if (typeof document !== 'undefined' && document.title) {
+        headers['X-Title'] = document.title;
+      }
+
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: 'google/gemma-3-27b-it:free',
+          messages: [{ role: 'user', content: prompt }],
+          provider: { data_collection: 'allow' },
+          temperature: 0.3
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        const isDataPolicyBlock =
+          response.status === 404 &&
+          /No endpoints found matching your data policy|Free model publication/i.test(errorText);
+
+        if (isDataPolicyBlock) {
+          return returnError(
+            `OpenRouter API Error: ${response.status}, ${errorText}\n` +
+            `Privacy/Data Policy اکانت OpenRouter اجازه استفاده از مدل‌های رایگان را نمی‌دهد.\n` +
+            `در https://openrouter.ai/settings/privacy تنظیم مربوط به Free model publication / Data Policy را روی Allow قرار بده.`
+          );
+        }
+
+        return returnError(`OpenRouter API Error: ${response.status}, ${errorText}`);
+      }
+      const data = await response.json();
+      const rawText = data.choices?.[0]?.message?.content;
+      if (!rawText) return returnError("No response from OpenRouter API");
+
+      const tryJsonParse = (candidate) => {
+        if (!candidate) return null;
+        const normalized = candidate
+          .trim()
+          .replace(/^\uFEFF/, '')
+          // Remove common markdown fences.
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```\s*$/i, '');
+
+        // Fix a common non-strict JSON issue: trailing commas.
+        const noTrailingCommas = normalized.replace(/,(\s*[}\]])/g, '$1');
+
+        try {
+          return JSON.parse(noTrailingCommas);
+        } catch {
+          return null;
+        }
+      };
+
+      const extractJsonObject = (text) => {
+        if (!text) return null;
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start === -1 || end === -1 || end <= start) return null;
+        return text.slice(start, end + 1);
+      };
+
+      const normalizeWordList = (value) => {
+        const list = Array.isArray(value)
+          ? value.map(v => (v ?? '').toString().trim())
+          : (typeof value === 'string'
+              ? value.split(/[,\n]/g).map(v => v.trim())
+              : []);
+
+        const hasLatin = (s) => /[A-Za-z]/.test(s);
+        const hasArabic = (s) => /[\u0600-\u06FF]/.test(s);
+
+        return list
+          .filter(Boolean)
+          .map(s => s.replace(/^["'\s]+|["'\s]+$/g, ''))
+          .filter(s => s && hasLatin(s) && !hasArabic(s));
+      };
+
+      const normalizeMeaningResult = (obj) => {
+        if (!obj || typeof obj !== 'object') return null;
+        if (!Array.isArray(obj.meanings)) return null;
+
+        const meanings = obj.meanings
+          .map(m => {
+            const text = (m?.text ?? '').toString().trim();
+            const type = (m?.type ?? '').toString().trim();
+            return { text, type };
+          })
+          .filter(m => m.text);
+
+        if (meanings.length === 0) return null;
+
+        return {
+          meanings,
+          synonyms: normalizeWordList(obj.synonyms),
+          antonyms: normalizeWordList(obj.antonyms)
+        };
+      };
+
+      const parsed =
+        tryJsonParse(rawText) ||
+        tryJsonParse(extractJsonObject(rawText));
+
+      const result = normalizeMeaningResult(parsed);
+      if (!result) {
+        console.error("Failed to parse/normalize meaning (OpenRouter). Raw:", rawText);
+        const preview = rawText.toString().slice(0, 400);
+        return returnError(`Failed to parse meaning. Response preview: ${preview}`);
+      }
+
+      await this.db
+        .set('word_meanings', { word: lowerWord, value: result })
+        .catch(err => console.error("Failed to cache meaning:", err));
+
+      return result;
+    } catch (error) {
+      console.error("Word meaning error (OpenRouter):", error);
+      return returnError("Request failed");
+    }
   }
 
   async getWordMeaningAvalai(word) {
@@ -2651,7 +3200,41 @@ Be thorough and comprehensive.`;
 
   async translateText(text) {
     if (this.chatProvider === 'avalai' && this.AVALAI_API_KEY) return this.translateTextAvalai(text);
+    if (this.chatProvider === 'openrouter' && this.OPENROUTER_API_KEY) return this.translateTextOpenRouter(text);
     return this.translateTextGemini(text);
+  }
+
+  async translateTextOpenRouter(text) {
+    if (!this.OPENROUTER_API_KEY) return `Translation requires API key.`;
+    const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+    try {
+      const headers = {
+        'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      };
+      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
+        headers['HTTP-Referer'] = location.origin;
+      }
+      if (typeof document !== 'undefined' && document.title) {
+        headers['X-Title'] = document.title;
+      }
+
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: 'google/gemma-3-27b-it:free',
+          messages: [{ role: 'user', content: prompt }],
+          provider: { data_collection: 'allow' }
+        })
+      });
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "Translation failed";
+    } catch (error) {
+      console.error("Translation error (OpenRouter):", error);
+      return "Translation failed";
+    }
   }
 
   async translateTextGemini(text) {
@@ -2924,36 +3507,34 @@ Be thorough and comprehensive.`;
           if (card.scopeKey !== 'global:all') return false;
         }
         
-        // Validate and parse due date
-        if (!card.dueDate) {
-          console.warn('Card missing dueDate:', card.word);
-          return false;
-        }
-        
-        const dueDate = new Date(card.dueDate);
-        if (isNaN(dueDate.getTime())) {
-          console.warn('Card has invalid dueDate:', card.word, card.dueDate);
-          return false;
-        }
-        
-        dueDate.setHours(0, 0, 0, 0);
-        return dueDate <= today;
+        const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
+        const dueDate = this.getMidnightLocal(dueIso);
+        if (!dueDate) return false;
+        return dueDate.getTime() <= today.getTime();
       });
       
       // Sort cards by priority: overdue (oldest first) -> new -> regular due
       cardsToReview.sort((a, b) => {
-        const aDue = new Date(a.dueDate);
-        const bDue = new Date(b.dueDate);
-        aDue.setHours(0, 0, 0, 0);
-        bDue.setHours(0, 0, 0, 0);
+        const aDueIso = this.coerceIsoDate(a.dueDate, a.createdAt);
+        const bDueIso = this.coerceIsoDate(b.dueDate, b.createdAt);
+        const aDue = this.getMidnightLocal(aDueIso) || today;
+        const bDue = this.getMidnightLocal(bDueIso) || today;
         
         const aIsNew = (a.repetitions || 0) === 0;
         const bIsNew = (b.repetitions || 0) === 0;
+
+        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
+        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
+
+        // Overdue review cards first
+        if (aIsOverdue && !bIsOverdue) return -1;
+        if (!aIsOverdue && bIsOverdue) return 1;
+        if (aIsOverdue && bIsOverdue) return aDue - bDue;
         
         // Both new - random order
         if (aIsNew && bIsNew) return Math.random() - 0.5;
         
-        // One is new, one is review - new cards first
+        // One is new, one is review - new cards next
         if (aIsNew) return -1;
         if (bIsNew) return 1;
         
@@ -3486,7 +4067,10 @@ Be thorough and comprehensive.`;
           tts_provider: this.ttsProvider || 'gemini',
           theme: this.theme || 'light',
           gemini_api_key: this.API_KEY || '',
-          avalai_api_key: this.AVALAI_API_KEY || ''
+          avalai_api_key: this.AVALAI_API_KEY || '',
+          openrouter_api_key: this.OPENROUTER_API_KEY || '',
+          elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
+          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -3647,6 +4231,21 @@ Be thorough and comprehensive.`;
           localStorage.setItem('avalai_api_key', this.AVALAI_API_KEY || '');
           if (this.avalaiApiKeyInput) this.avalaiApiKeyInput.value = this.AVALAI_API_KEY;
         }
+        if (typeof localData.openrouter_api_key === 'string') {
+          this.OPENROUTER_API_KEY = localData.openrouter_api_key;
+          localStorage.setItem('openrouter_api_key', this.OPENROUTER_API_KEY || '');
+          if (this.openRouterApiKeyInput) this.openRouterApiKeyInput.value = this.OPENROUTER_API_KEY;
+        }
+        if (typeof localData.elevenlabs_api_key === 'string') {
+          this.ELEVENLABS_API_KEY = localData.elevenlabs_api_key;
+          localStorage.setItem('elevenlabs_api_key', this.ELEVENLABS_API_KEY || '');
+          if (this.elevenLabsApiKeyInput) this.elevenLabsApiKeyInput.value = this.ELEVENLABS_API_KEY;
+        }
+        if (typeof localData.elevenlabs_voice_id === 'string') {
+          this.ELEVENLABS_VOICE_ID = localData.elevenlabs_voice_id;
+          localStorage.setItem('elevenlabs_voice_id', this.ELEVENLABS_VOICE_ID || '');
+          if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID;
+        }
 
         // Import word meanings
         await this.db.clearStore('word_meanings');
@@ -3683,10 +4282,12 @@ Be thorough and comprehensive.`;
                   const scopeType = card.chatId ? 'chat' : 'global';
                   const scopeId = card.chatId || 'all';
                   const scopeKey = `${scopeType}:${scopeId}`;
-                  const id = `${scopeKey}:${card.word}`;
+                  const normalizedWord = (card.word || '').toString().trim().toLowerCase();
+                  const id = `${scopeKey}:${normalizedWord}`;
                   const migratedCard = {
                     ...card,
                     id,
+                    word: normalizedWord,
                     scopeType,
                     scopeId,
                     scopeKey,
@@ -3735,6 +4336,9 @@ Be thorough and comprehensive.`;
         } else {
           console.log('Import - No audio cache found in backup');
         }
+
+        // Normalize/repair Leitner cards (handles legacy casing/IDs) before reloading scope
+        await this.normalizeLeitnerData().catch(err => console.error('[Leitner] Failed to normalize after import:', err));
 
         // Reload active scope after import
         const activeScope = this.getActiveScope();
@@ -4478,6 +5082,8 @@ class AdvancedTTSPlayer {
         audioBlob = await this.generateAvalaiTTS(text);
       } else if (this.app.ttsProvider === 'gemini' && this.app.API_KEY) {
         audioBlob = await this.generateGeminiTTS(text);
+      } else if (this.app.ttsProvider === 'elevenlabs' && this.app.ELEVENLABS_API_KEY) {
+        audioBlob = await this.generateElevenLabsTTS(text);
       } else {
         // No API key available
         this.app.showToast('No TTS API key configured', 'error');
@@ -4552,6 +5158,40 @@ class AdvancedTTSPlayer {
     const pcmDataBuffer = this.app.base64ToArrayBuffer(audioData);
     const pcm16 = new Int16Array(pcmDataBuffer);
     return this.app.pcmToWav(pcm16, sampleRate);
+  }
+
+  async generateElevenLabsTTS(text) {
+    const voiceId = await this.app.getElevenLabsPreferredVoiceId('Brian');
+    if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
+
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': this.app.ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text,
+        model_id: 'eleven_flash_v2_5'
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let parsed;
+      try { parsed = JSON.parse(errorText); } catch (_) { parsed = null; }
+      const unusualActivity = response.status === 401 &&
+        (parsed?.detail?.status === 'detected_unusual_activity' || /detected_unusual_activity/i.test(errorText));
+      if (unusualActivity) {
+        throw new Error(
+          'ElevenLabs blocked Free Tier on this network/VPN (detected unusual activity). ' +
+          'Try turning off VPN, switching network/IP, or use a Paid ElevenLabs plan.'
+        );
+      }
+      throw new Error(`ElevenLabs TTS error: ${response.status} ${errorText}`);
+    }
+
+    return await response.blob();
   }
 
   startSentenceSync() {
