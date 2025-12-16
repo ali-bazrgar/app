@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <!-- Puter.js SDK for TTS -->
+  <script src="https://js.puter.com/v2/"></script>
 </head>
 <body>
   <!-- Toast Notification Container -->
@@ -78,7 +80,7 @@
           <select id="chat-provider-select" class="settings-select">
               <option value="gemini">Provider 1</option>
               <option value="avalai">Provider 2</option>
-              <option value="openrouter">Provider 3</option>
+              <option value="openrouter">OpenRouter (Free) ✨</option>
           </select>
         </div>
         
@@ -87,7 +89,7 @@
           <select id="tts-provider-select" class="settings-select">
               <option value="gemini">Provider 1</option>
               <option value="avalai">Provider 2</option>
-              <option value="elevenlabs">Provider 3</option>
+              <option value="puter">Puter (Free) ✨</option>
           </select>
         </div>
 
@@ -99,20 +101,9 @@
             <p>API Key (Provider 2):</p>
             <input type="password" id="avalai-api-key-input" placeholder="Enter your API key...">
         </div>
-
         <div class="setting-section">
-          <p>API Key (OpenRouter):</p>
-          <input type="password" id="openrouter-api-key-input" placeholder="Enter your OpenRouter API key...">
-        </div>
-        <div class="setting-section">
-          <p>API Key (ElevenLabs):</p>
-          <input type="password" id="elevenlabs-api-key-input" placeholder="Enter your ElevenLabs API key...">
-        </div>
-
-        <div class="setting-section">
-          <p>ElevenLabs Voice ID (Brian):</p>
-          <input type="text" id="elevenlabs-voice-id-input" placeholder="Enter voice_id (optional)">
-          <small style="color: #666; display: block; margin-top: 5px;">Optional. If your ElevenLabs key lacks <b>voices_read</b>, paste Brian’s voice_id here so the app can call TTS without listing voices.</small>
+            <p>API Key (OpenRouter):</p>
+            <input type="password" id="openrouter-api-key-input" placeholder="Enter your OpenRouter API key...">
         </div>
         
         <div class="setting-section">
@@ -239,6 +230,13 @@
             </div>
             <button id="close-leitner-btn" class="popup-close">×</button>
         </div>
+        <div class="leitner-box-progress" id="leitner-box-progress">
+            <div class="box-item" data-box="1"><span class="box-num">🌱</span><span class="box-count">0</span><span class="box-label">Learning</span></div>
+            <div class="box-item" data-box="2"><span class="box-num">🌿</span><span class="box-count">0</span><span class="box-label">Young</span></div>
+            <div class="box-item" data-box="3"><span class="box-num">🌳</span><span class="box-count">0</span><span class="box-label">Maturing</span></div>
+            <div class="box-item" data-box="4"><span class="box-num">💪</span><span class="box-count">0</span><span class="box-label">Mature</span></div>
+            <div class="box-item" data-box="5"><span class="box-num">🎓</span><span class="box-count">0</span><span class="box-label">Mastered</span></div>
+        </div>
         <div class="leitner-body">
             <div id="leitner-card-container">
                 <div class="leitner-card">
@@ -257,10 +255,10 @@
                 <button id="show-answer-btn" class="btn-primary">Show Answer <small style="opacity: 0.7; font-size: 11px;">(Space/Enter)</small></button>
             </div>
             <div id="leitner-rating-controls" class="hidden">
-                <button class="btn-leitner-rating" id="rating-again">Again <small>1</small></button>
-                <button class="btn-leitner-rating" id="rating-hard">Hard <small>2</small></button>
-                <button class="btn-leitner-rating" id="rating-good">Good <small>3</small></button>
-                <button class="btn-leitner-rating" id="rating-easy">Easy <small>4</small></button>
+                <button class="btn-leitner-rating btn-again" id="rating-again">Again<br><small>< 1d [1]</small></button>
+                <button class="btn-leitner-rating btn-hard" id="rating-hard">Hard<br><small>1d [2]</small></button>
+                <button class="btn-leitner-rating btn-good" id="rating-good">Good<br><small>1d [3]</small></button>
+                <button class="btn-leitner-rating btn-easy" id="rating-easy">Easy<br><small>4d [4]</small></button>
             </div>
         </div>
         <div id="leitner-finished-screen" class="hidden">
