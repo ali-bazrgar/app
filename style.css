@@ -1957,6 +1957,9 @@ body.theme-dark .tts-sentence-highlight {
   background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
   border-color: #86efac;
   overflow-y: auto; 
+  justify-content: flex-start;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 #card-back-text { 
