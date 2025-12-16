@@ -3418,14 +3418,14 @@ Be thorough and comprehensive.`;
     // Review settings
     startingEase: 2.5,                 // Initial ease factor (250%)
     minimumEase: 1.3,                  // Minimum ease factor (130%)
-    easyBonus: 1.3,                    // Easy button multiplier
+    easyIntervalMultiplier: 1.3,       // Easy button interval multiplier
     hardInterval: 1.2,                 // Hard button interval multiplier
     
     // Ease factor adjustments
     againPenalty: 0.2,                 // Subtract from ease on Again
     hardPenalty: 0.15,                 // Subtract from ease on Hard  
     goodBonus: 0,                      // No change on Good
-    easyBonus: 0.15,                   // Add to ease on Easy
+    easyEaseBonus: 0.15,               // Add to ease on Easy
     
     // Lapse settings
     lapseNewInterval: 0.7,             // Multiply interval on lapse
@@ -3448,7 +3448,7 @@ Be thorough and comprehensive.`;
      *   - Again (Lapse): Reset to relearning, reduce interval
      *   - Hard: interval * hardInterval, reduce ease
      *   - Good: interval * ease
-     *   - Easy: interval * ease * easyBonus
+    *   - Easy: interval * ease * easyIntervalMultiplier
      *
      * Ease Factor adjustment:
      *   new_ease = ease + (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02))
@@ -3484,7 +3484,7 @@ Be thorough and comprehensive.`;
           break;
         case 4: // Easy - graduate with bonus interval
           newInterval = config.easyInterval;
-          newEase = Math.max(config.minimumEase, currentEase + config.easyBonus);
+          newEase = Math.max(config.minimumEase, currentEase + config.easyEaseBonus);
           newRepetitions = 1;
           status = 'review';
           break;
@@ -3514,8 +3514,8 @@ Be thorough and comprehensive.`;
           status = 'review';
           break;
         case 4: // Easy - bonus interval and ease
-          newInterval = Math.max(1, Math.round(currentInterval * currentEase * config.easyBonus));
-          newEase = currentEase + config.easyBonus;
+          newInterval = Math.max(1, Math.round(currentInterval * currentEase * config.easyIntervalMultiplier));
+          newEase = currentEase + config.easyEaseBonus;
           newRepetitions = card.repetitions + 1;
           status = 'review';
           break;
@@ -4605,6 +4605,7 @@ class AdvancedTTSPlayer {
   setupGlobalTapHandler() {
     // Setup once at app level - on the entire main content area
     const mainContent = document.querySelector('.main-content');
+    const chatMain = document.getElementById('chat-main');
     
     const tapHandler = (e) => {
       // Find which player should handle this click
@@ -4616,8 +4617,12 @@ class AdvancedTTSPlayer {
         const messageId = clickedMessage.id;
         targetPlayer = this.app.activeTTSPlayers.get(messageId);
       } else {
-        // Click in empty space - use the only active player (if any)
-        if (this.app.activeTTSPlayers.size === 1) {
+        // Click in empty space - only toggle when the user is in the Chat view.
+        // This prevents clicks in the Documents view from accidentally pausing/resuming
+        // an audio started from Chat.
+        const isChatVisible = chatMain && !chatMain.classList.contains('hidden');
+        const clickedInsideChat = chatMain && chatMain.contains(e.target);
+        if (isChatVisible && clickedInsideChat && this.app.activeTTSPlayers.size === 1) {
           targetPlayer = Array.from(this.app.activeTTSPlayers.values())[0];
         }
       }
